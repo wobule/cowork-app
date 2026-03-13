@@ -9,46 +9,52 @@ import { execFileSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import Database from 'better-sqlite3';
+import { createClient } from '@libsql/client';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, 'data', 'mission-control.db');
 const CLI_PATH = path.join(__dirname, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
 
 // ---------------------------------------------------------------------------
 // DB helpers
 // ---------------------------------------------------------------------------
 
+let _client = null;
+
 function getDb() {
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  return db;
+  if (!_client) {
+    const url = process.env.TURSO_DATABASE_URL || `file:${path.join(__dirname, 'data', 'mission-control.db')}`;
+    _client = createClient({
+      url,
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
+  }
+  return _client;
 }
 
 // ---------------------------------------------------------------------------
 // Team context helper
 // ---------------------------------------------------------------------------
 
-function getTeamContext(db) {
-  const agents = db.prepare(`
+async function getTeamContext(db) {
+  const agentsResult = await db.execute(`
     SELECT a.*, t.title as current_task_title
     FROM agents a
     LEFT JOIN tasks t ON a.current_task_id = t.id
     WHERE a.enabled = 1
     ORDER BY a.created_at ASC
-  `).all();
+  `);
 
-  const taskCounts = db.prepare(`
-    SELECT status, COUNT(*) as c FROM tasks GROUP BY status
-  `).all();
+  const taskCountsResult = await db.execute(
+    'SELECT status, COUNT(*) as c FROM tasks GROUP BY status'
+  );
 
   const statusMap = {};
-  for (const row of taskCounts) {
-    statusMap[row.status] = row.c;
+  for (const row of taskCountsResult.rows) {
+    statusMap[row.status] = Number(row.c);
   }
 
   let context = '## 團隊成員\n';
-  for (const a of agents) {
+  for (const a of agentsResult.rows) {
     const skills = (() => {
       try {
         return typeof a.skills === 'string' ? JSON.parse(a.skills) : (a.skills || []);
@@ -202,7 +208,7 @@ ${teamContext || '（無法取得團隊狀態）'}
 // Parse and execute agent actions
 // ---------------------------------------------------------------------------
 
-function parseAndExecuteActions(db, output, agentId, agentName, agentColor, parentTaskId) {
+async function parseAndExecuteActions(db, output, agentId, agentName, agentColor, parentTaskId) {
   const actionRegex = /```action\s*\n([\s\S]*?)```/g;
   const actions = [];
   let match;
@@ -231,9 +237,11 @@ function parseAndExecuteActions(db, output, agentId, agentName, agentColor, pare
           }
 
           // Check subtask depth: don't allow more than 2 levels
-          const parentTask = db.prepare('SELECT parent_task_id FROM tasks WHERE id = ?').get(parentTaskId);
+          const parentResult = await db.execute({ sql: 'SELECT parent_task_id FROM tasks WHERE id = ?', args: [parentTaskId] });
+          const parentTask = parentResult.rows[0];
           if (parentTask?.parent_task_id) {
-            const grandParent = db.prepare('SELECT parent_task_id FROM tasks WHERE id = ?').get(parentTask.parent_task_id);
+            const grandParentResult = await db.execute({ sql: 'SELECT parent_task_id FROM tasks WHERE id = ?', args: [parentTask.parent_task_id] });
+            const grandParent = grandParentResult.rows[0];
             if (grandParent?.parent_task_id) {
               console.log(`  ⚠️ Max subtask depth (2) reached, skipping`);
               break;
@@ -241,30 +249,34 @@ function parseAndExecuteActions(db, output, agentId, agentName, agentColor, pare
           }
 
           // Resolve assignee
-          const assignee = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.assignee);
+          const assigneeResult = await db.execute({ sql: 'SELECT id, name, color FROM agents WHERE name = ?', args: [action.assignee] });
+          const assignee = assigneeResult.rows[0];
           if (!assignee) {
             console.log(`  ⚠️ Unknown agent "${action.assignee}", skipping subtask`);
             break;
           }
 
           const taskId = crypto.randomUUID();
-          db.prepare(`
-            INSERT INTO tasks (id, title, description, status, priority, assignee_id, parent_task_id, created_by_agent_id, created_at, updated_at)
-            VALUES (?, ?, ?, 'backlog', ?, ?, ?, ?, ?, ?)
-          `).run(
-            taskId,
-            action.title,
-            action.description || '',
-            action.priority || 'medium',
-            assignee.id,
-            parentTaskId,
-            agentId,
-            now(),
-            now()
-          );
+          await db.execute({
+            sql: `INSERT INTO tasks (id, title, description, status, priority, assignee_id, parent_task_id, created_by_agent_id, created_at, updated_at)
+                  VALUES (?, ?, ?, 'backlog', ?, ?, ?, ?, ?, ?)`,
+            args: [
+              taskId,
+              action.title,
+              action.description || '',
+              action.priority || 'medium',
+              assignee.id,
+              parentTaskId,
+              agentId,
+              now(),
+              now()
+            ],
+          });
 
-          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
-            .run(agentId, agentName, agentColor, `建立子任務「${action.title}」並指派給 ${assignee.name}`, parentTaskId, now());
+          await db.execute({
+            sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)',
+            args: [agentId, agentName, agentColor, `建立子任務「${action.title}」並指派給 ${assignee.name}`, parentTaskId, now()],
+          });
 
           console.log(`  📋 Created subtask "${action.title}" → ${assignee.name}`);
           subtaskCount++;
@@ -272,38 +284,48 @@ function parseAndExecuteActions(db, output, agentId, agentName, agentColor, pare
         }
 
         case 'send_message': {
-          const targetAgent = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.to);
+          const targetResult = await db.execute({ sql: 'SELECT id, name, color FROM agents WHERE name = ?', args: [action.to] });
+          const targetAgent = targetResult.rows[0];
           if (!targetAgent) {
             console.log(`  ⚠️ Unknown agent "${action.to}", skipping message`);
             break;
           }
 
-          // Find target agent's current task, or create a note in activities
-          const targetTask = db.prepare('SELECT current_task_id FROM agents WHERE id = ?').get(targetAgent.id);
+          const targetTaskResult = await db.execute({ sql: 'SELECT current_task_id FROM agents WHERE id = ?', args: [targetAgent.id] });
+          const targetTask = targetTaskResult.rows[0];
           if (targetTask?.current_task_id) {
-            db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-              .run(targetTask.current_task_id, agentId, agentName, agentColor, 'agent', `💬 來自 ${agentName} 的訊息：${action.message}`, now());
+            await db.execute({
+              sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+              args: [targetTask.current_task_id, agentId, agentName, agentColor, 'agent', `💬 來自 ${agentName} 的訊息：${action.message}`, now()],
+            });
           }
 
-          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
-            .run(agentId, agentName, agentColor, `發送訊息給 ${targetAgent.name}：${action.message}`, parentTaskId, now());
+          await db.execute({
+            sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)',
+            args: [agentId, agentName, agentColor, `發送訊息給 ${targetAgent.name}：${action.message}`, parentTaskId, now()],
+          });
 
           console.log(`  💬 Message sent to ${targetAgent.name}`);
           break;
         }
 
         case 'request_review': {
-          const reviewer = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.reviewer);
+          const reviewerResult = await db.execute({ sql: 'SELECT id, name, color FROM agents WHERE name = ?', args: [action.reviewer] });
+          const reviewer = reviewerResult.rows[0];
           if (!reviewer) {
             console.log(`  ⚠️ Unknown reviewer "${action.reviewer}", skipping`);
             break;
           }
 
-          db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-            .run(parentTaskId, agentId, agentName, agentColor, 'agent', `📝 請 ${reviewer.name} 審核：${action.message || '請幫我檢查這個任務的產出'}`, now());
+          await db.execute({
+            sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+            args: [parentTaskId, agentId, agentName, agentColor, 'agent', `📝 請 ${reviewer.name} 審核：${action.message || '請幫我檢查這個任務的產出'}`, now()],
+          });
 
-          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
-            .run(agentId, agentName, agentColor, `請求 ${reviewer.name} 審核任務`, parentTaskId, now());
+          await db.execute({
+            sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)',
+            args: [agentId, agentName, agentColor, `請求 ${reviewer.name} 審核任務`, parentTaskId, now()],
+          });
 
           console.log(`  📝 Review requested from ${reviewer.name}`);
           break;
@@ -330,25 +352,29 @@ async function processTask(db, agent, task) {
   const now = () => new Date().toISOString();
 
   // Mark as in progress
-  db.prepare(`UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ?`).run(now(), task.id);
-  db.prepare(`UPDATE agents SET status = 'working', current_task_id = ? WHERE id = ?`).run(task.id, agent.id);
+  await db.execute({ sql: `UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ?`, args: [now(), task.id] });
+  await db.execute({ sql: `UPDATE agents SET status = 'working', current_task_id = ? WHERE id = ?`, args: [task.id, agent.id] });
 
   // Activity: started
-  db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
-    .run(agent.id, agent.name, agent.color, `開始處理任務「${task.title}」`, task.id, now());
+  await db.execute({
+    sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)',
+    args: [agent.id, agent.name, agent.color, `開始處理任務「${task.title}」`, task.id, now()],
+  });
 
   // Comment: started
-  db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-    .run(task.id, agent.id, agent.name, agent.color, 'agent', `收到任務！我是 ${agent.name}（${agent.role}），正在使用 ${agent.model} 模型處理中...`, now());
+  await db.execute({
+    sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+    args: [task.id, agent.id, agent.name, agent.color, 'agent', `收到任務！我是 ${agent.name}（${agent.role}），正在使用 ${agent.model} 模型處理中...`, now()],
+  });
 
   console.log(`  ⏳ Calling Claude CLI (model: ${getModel(agent.model)})...`);
 
   // Get existing comments for context
-  const comments = db.prepare(`SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC`).all(task.id)
-    .map(c => `[${c.role === 'user' ? '使用者' : c.agent_name}]: ${c.content}`);
+  const commentsResult = await db.execute({ sql: 'SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC', args: [task.id] });
+  const comments = commentsResult.rows.map(c => `[${c.role === 'user' ? '使用者' : c.agent_name}]: ${c.content}`);
 
   // Build prompt and call AI
-  const teamContext = getTeamContext(db);
+  const teamContext = await getTeamContext(db);
   const prompt = buildPrompt(agent, task, comments.length > 1 ? comments : undefined, teamContext);
   const model = getModel(agent.model);
 
@@ -357,28 +383,34 @@ async function processTask(db, agent, task) {
     console.log(`  ✅ Got response (${rawOutput.length} chars)`);
 
     // Parse and execute any agent actions, get cleaned output
-    const output = parseAndExecuteActions(db, rawOutput, agent.id, agent.name, agent.color, task.id);
+    const output = await parseAndExecuteActions(db, rawOutput, agent.id, agent.name, agent.color, task.id);
 
     // Save cleaned output as comment
-    db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-      .run(task.id, agent.id, agent.name, agent.color, 'agent', output, now());
+    await db.execute({
+      sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+      args: [task.id, agent.id, agent.name, agent.color, 'agent', output, now()],
+    });
 
     // Move to review
-    db.prepare(`UPDATE tasks SET status = 'review', updated_at = ? WHERE id = ?`).run(now(), task.id);
-    db.prepare(`UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?`).run(agent.id);
+    await db.execute({ sql: `UPDATE tasks SET status = 'review', updated_at = ? WHERE id = ?`, args: [now(), task.id] });
+    await db.execute({ sql: `UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?`, args: [agent.id] });
 
-    db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
-      .run(agent.id, agent.name, agent.color, `已完成任務「${task.title}」，等待審核`, task.id, now());
+    await db.execute({
+      sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)',
+      args: [agent.id, agent.name, agent.color, `已完成任務「${task.title}」，等待審核`, task.id, now()],
+    });
 
     return true;
   } catch (err) {
     console.error(`  ❌ Error:`, err.message);
 
-    db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-      .run(task.id, agent.id, agent.name, agent.color, 'agent', `⚠️ 執行失敗：${err.message}`, now());
+    await db.execute({
+      sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+      args: [task.id, agent.id, agent.name, agent.color, 'agent', `⚠️ 執行失敗：${err.message}`, now()],
+    });
 
     // Reset agent to idle
-    db.prepare(`UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?`).run(agent.id);
+    await db.execute({ sql: `UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?`, args: [agent.id] });
 
     return false;
   }
@@ -390,7 +422,7 @@ async function processTask(db, agent, task) {
 
 async function processUserMessages(db) {
   // Find tasks with user messages that don't have a recent agent reply
-  const tasksWithPendingReplies = db.prepare(`
+  const result = await db.execute(`
     SELECT tc.task_id, tc.content as user_msg, tc.created_at as msg_time,
            t.title, t.description, t.assignee_id,
            a.id as agent_id, a.name as agent_name, a.role as agent_role,
@@ -408,13 +440,13 @@ async function processUserMessages(db) {
       AND tc2.content NOT LIKE '💭%'
       AND tc2.id > tc.id
     )
-  `).all();
+  `);
 
-  for (const row of tasksWithPendingReplies) {
+  for (const row of result.rows) {
     console.log(`💬 Replying to user message on "${row.title}"...`);
 
     // Get full conversation history
-    const allComments = db.prepare(`SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC`).all(row.task_id);
+    const allCommentsResult = await db.execute({ sql: 'SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC', args: [row.task_id] });
 
     const skills = (() => {
       try { return typeof row.agent_skills === 'string' ? JSON.parse(row.agent_skills) : []; }
@@ -433,8 +465,8 @@ ${row.description || ''}
 ## 對話紀錄
 `;
 
-    for (const c of allComments) {
-      if (c.content.startsWith('💭')) continue;
+    for (const c of allCommentsResult.rows) {
+      if (typeof c.content === 'string' && c.content.startsWith('💭')) continue;
       const label = c.role === 'user' ? '使用者' : c.agent_name;
       prompt += `**${label}**：${c.content}\n\n`;
     }
@@ -446,13 +478,17 @@ ${row.description || ''}
       console.log(`  ✅ Reply generated (${reply.length} chars)`);
 
       const now = new Date().toISOString();
-      db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-        .run(row.task_id, row.agent_id, row.agent_name, row.agent_color, 'agent', reply, now);
+      await db.execute({
+        sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+        args: [row.task_id, row.agent_id, row.agent_name, row.agent_color, 'agent', reply, now],
+      });
     } catch (err) {
       console.error(`  ❌ Reply failed:`, err.message);
       const now = new Date().toISOString();
-      db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
-        .run(row.task_id, row.agent_id, row.agent_name, row.agent_color, 'agent', `⚠️ 回覆失敗：${err.message}`, now);
+      await db.execute({
+        sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)',
+        args: [row.task_id, row.agent_id, row.agent_name, row.agent_color, 'agent', `⚠️ 回覆失敗：${err.message}`, now],
+      });
     }
   }
 }
@@ -465,7 +501,7 @@ async function poll() {
   const db = getDb();
 
   // 1. Find backlog tasks assigned to enabled agents
-  const backlogTasks = db.prepare(`
+  const backlogResult = await db.execute(`
     SELECT t.*, a.id as agent_id, a.name as agent_name, a.role as agent_role,
            a.description as agent_desc, a.model as agent_model, a.skills as agent_skills,
            a.color as agent_color, a.status as agent_status
@@ -475,10 +511,10 @@ async function poll() {
     AND a.enabled = 1
     AND a.status = 'idle'
     ORDER BY t.created_at ASC
-  `).all();
+  `);
 
-  if (backlogTasks.length > 0) {
-    const task = backlogTasks[0];
+  if (backlogResult.rows.length > 0) {
+    const task = backlogResult.rows[0];
     console.log(`\n📋 Found backlog task: "${task.title}" → ${task.agent_name}`);
 
     await processTask(db, {
@@ -494,8 +530,6 @@ async function poll() {
 
   // 2. Check for pending user messages that need replies
   await processUserMessages(db);
-
-  db.close();
 }
 
 // ---------------------------------------------------------------------------
@@ -504,8 +538,9 @@ async function poll() {
 
 const POLL_INTERVAL = 10000; // 10 seconds
 
+const dbUrl = process.env.TURSO_DATABASE_URL || `file:${path.join(__dirname, 'data', 'mission-control.db')}`;
 console.log('🚀 Agent Worker started');
-console.log(`   DB: ${DB_PATH}`);
+console.log(`   DB: ${dbUrl}`);
 console.log(`   CLI: ${CLI_PATH}`);
 console.log(`   Poll interval: ${POLL_INTERVAL / 1000}s`);
 console.log('');

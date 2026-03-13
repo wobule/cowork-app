@@ -5,7 +5,7 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const limit = parseInt(searchParams.get('limit') || '50', 10);
-    const activities = getActivities(limit);
+    const activities = await getActivities(limit);
     // Map to frontend expected format
     const mapped = (activities as Record<string, unknown>[]).map((a) => ({
       id: a.id,
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '缺少必填欄位 (agent_id, agent_name, message)' }, { status: 400 });
     }
 
-    const activity = createActivity({
+    const activity = await createActivity({
       agent_id: body.agent_id,
       agent_name: body.agent_name,
       agent_color: body.agent_color,

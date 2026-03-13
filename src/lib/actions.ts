@@ -6,7 +6,7 @@ import type { Item, ItemWithLabels, Label, Project, SavedView, ViewFilters, View
 // ─── Items ──────────────────────────────────────────
 
 export async function getItems(filters?: ViewFilters, sort?: ViewSort): Promise<ItemWithLabels[]> {
-  const db = getDb();
+  const db = await getDb();
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -45,28 +45,30 @@ export async function getItems(filters?: ViewFilters, sort?: ViewSort): Promise<
   };
   const orderBy = `ORDER BY ${orderMap[sortField] || 'i.created_at'} ${sortDir}`;
 
-  const items = db.prepare(`SELECT i.* FROM items i ${where} ${orderBy}`).all(...params) as Item[];
+  const itemsResult = await db.execute({ sql: `SELECT i.* FROM items i ${where} ${orderBy}`, args: params as (string | number | null)[] });
+  const items = itemsResult.rows as unknown as Item[];
 
-  const labelStmt = db.prepare(`
-    SELECT l.* FROM labels l
-    JOIN item_labels il ON il.label_id = l.id
-    WHERE il.item_id = ?
-  `);
-
-  return items.map(item => ({
-    ...item,
-    labels: labelStmt.all(item.id) as Label[],
-  }));
+  const result: ItemWithLabels[] = [];
+  for (const item of items) {
+    const labelsResult = await db.execute({
+      sql: 'SELECT l.* FROM labels l JOIN item_labels il ON il.label_id = l.id WHERE il.item_id = ?',
+      args: [item.id],
+    });
+    result.push({ ...item, labels: labelsResult.rows as unknown as Label[] });
+  }
+  return result;
 }
 
 export async function getItem(id: number): Promise<ItemWithLabels | null> {
-  const db = getDb();
-  const item = db.prepare('SELECT * FROM items WHERE id = ?').get(id) as Item | undefined;
+  const db = await getDb();
+  const itemResult = await db.execute({ sql: 'SELECT * FROM items WHERE id = ?', args: [id] });
+  const item = itemResult.rows[0] as unknown as Item | undefined;
   if (!item) return null;
-  const labels = db.prepare(`
-    SELECT l.* FROM labels l JOIN item_labels il ON il.label_id = l.id WHERE il.item_id = ?
-  `).all(id) as Label[];
-  return { ...item, labels };
+  const labelsResult = await db.execute({
+    sql: 'SELECT l.* FROM labels l JOIN item_labels il ON il.label_id = l.id WHERE il.item_id = ?',
+    args: [id],
+  });
+  return { ...item, labels: labelsResult.rows as unknown as Label[] };
 }
 
 export async function createItem(data: {
@@ -78,26 +80,29 @@ export async function createItem(data: {
   due_date?: string | null;
   label_ids?: number[];
 }): Promise<Item> {
-  const db = getDb();
-  const result = db.prepare(
-    `INSERT INTO items (title, description, status, priority, project_id, due_date) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    data.title,
-    data.description || '',
-    data.status || 'todo',
-    data.priority || 'none',
-    data.project_id ?? null,
-    data.due_date ?? null,
-  );
+  const db = await getDb();
+  const result = await db.execute({
+    sql: 'INSERT INTO items (title, description, status, priority, project_id, due_date) VALUES (?, ?, ?, ?, ?, ?)',
+    args: [
+      data.title,
+      data.description || '',
+      data.status || 'todo',
+      data.priority || 'none',
+      data.project_id ?? null,
+      data.due_date ?? null,
+    ],
+  });
+
+  const insertedId = Number(result.lastInsertRowid);
 
   if (data.label_ids?.length) {
-    const stmt = db.prepare('INSERT INTO item_labels (item_id, label_id) VALUES (?, ?)');
     for (const lid of data.label_ids) {
-      stmt.run(result.lastInsertRowid, lid);
+      await db.execute({ sql: 'INSERT INTO item_labels (item_id, label_id) VALUES (?, ?)', args: [insertedId, lid] });
     }
   }
 
-  return db.prepare('SELECT * FROM items WHERE id = ?').get(result.lastInsertRowid) as Item;
+  const row = await db.execute({ sql: 'SELECT * FROM items WHERE id = ?', args: [insertedId] });
+  return row.rows[0] as unknown as Item;
 }
 
 export async function updateItem(id: number, data: {
@@ -109,7 +114,7 @@ export async function updateItem(id: number, data: {
   due_date?: string | null;
   label_ids?: number[];
 }): Promise<Item> {
-  const db = getDb();
+  const db = await getDb();
   const fields: string[] = [];
   const params: unknown[] = [];
 
@@ -123,62 +128,69 @@ export async function updateItem(id: number, data: {
   if (fields.length) {
     fields.push("updated_at = datetime('now')");
     params.push(id);
-    db.prepare(`UPDATE items SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+    await db.execute({ sql: `UPDATE items SET ${fields.join(', ')} WHERE id = ?`, args: params as (string | number | null)[] });
   }
 
   if (data.label_ids !== undefined) {
-    db.prepare('DELETE FROM item_labels WHERE item_id = ?').run(id);
-    const stmt = db.prepare('INSERT INTO item_labels (item_id, label_id) VALUES (?, ?)');
+    await db.execute({ sql: 'DELETE FROM item_labels WHERE item_id = ?', args: [id] });
     for (const lid of data.label_ids) {
-      stmt.run(id, lid);
+      await db.execute({ sql: 'INSERT INTO item_labels (item_id, label_id) VALUES (?, ?)', args: [id, lid] });
     }
   }
 
-  return db.prepare('SELECT * FROM items WHERE id = ?').get(id) as Item;
+  const row = await db.execute({ sql: 'SELECT * FROM items WHERE id = ?', args: [id] });
+  return row.rows[0] as unknown as Item;
 }
 
 export async function deleteItem(id: number): Promise<void> {
-  getDb().prepare('DELETE FROM items WHERE id = ?').run(id);
+  const db = await getDb();
+  await db.execute({ sql: 'DELETE FROM items WHERE id = ?', args: [id] });
 }
 
 export async function deleteItems(ids: number[]): Promise<void> {
-  const db = getDb();
-  const stmt = db.prepare('DELETE FROM items WHERE id = ?');
-  for (const id of ids) stmt.run(id);
+  const db = await getDb();
+  for (const id of ids) {
+    await db.execute({ sql: 'DELETE FROM items WHERE id = ?', args: [id] });
+  }
 }
 
 export async function updateItemStatus(id: number, status: string): Promise<void> {
-  getDb().prepare("UPDATE items SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
+  const db = await getDb();
+  await db.execute({ sql: "UPDATE items SET status = ?, updated_at = datetime('now') WHERE id = ?", args: [status, id] });
 }
 
 // ─── Projects ───────────────────────────────────────
 
 export async function getProjects(): Promise<Project[]> {
-  const db = getDb();
-  return db.prepare(`
+  const db = await getDb();
+  const result = await db.execute(`
     SELECT p.*, (SELECT COUNT(*) FROM items WHERE project_id = p.id) as item_count
     FROM projects p ORDER BY p.created_at DESC
-  `).all() as Project[];
+  `);
+  return result.rows as unknown as Project[];
 }
 
 export async function getProject(id: number): Promise<Project | null> {
-  const db = getDb();
-  return (db.prepare(`
-    SELECT p.*, (SELECT COUNT(*) FROM items WHERE project_id = p.id) as item_count
-    FROM projects p WHERE p.id = ?
-  `).get(id) as Project) || null;
+  const db = await getDb();
+  const result = await db.execute({
+    sql: `SELECT p.*, (SELECT COUNT(*) FROM items WHERE project_id = p.id) as item_count FROM projects p WHERE p.id = ?`,
+    args: [id],
+  });
+  return (result.rows[0] as unknown as Project) || null;
 }
 
 export async function createProject(data: { name: string; color?: string; description?: string }): Promise<Project> {
-  const db = getDb();
-  const result = db.prepare('INSERT INTO projects (name, color, description) VALUES (?, ?, ?)').run(
-    data.name, data.color || '#6366f1', data.description || ''
-  );
-  return db.prepare('SELECT * FROM projects WHERE id = ?').get(result.lastInsertRowid) as Project;
+  const db = await getDb();
+  const result = await db.execute({
+    sql: 'INSERT INTO projects (name, color, description) VALUES (?, ?, ?)',
+    args: [data.name, data.color || '#6366f1', data.description || ''],
+  });
+  const row = await db.execute({ sql: 'SELECT * FROM projects WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  return row.rows[0] as unknown as Project;
 }
 
 export async function updateProject(id: number, data: { name?: string; color?: string; description?: string }): Promise<Project> {
-  const db = getDb();
+  const db = await getDb();
   const fields: string[] = [];
   const params: unknown[] = [];
   if (data.name !== undefined) { fields.push('name = ?'); params.push(data.name); }
@@ -186,81 +198,97 @@ export async function updateProject(id: number, data: { name?: string; color?: s
   if (data.description !== undefined) { fields.push('description = ?'); params.push(data.description); }
   if (fields.length) {
     params.push(id);
-    db.prepare(`UPDATE projects SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+    await db.execute({ sql: `UPDATE projects SET ${fields.join(', ')} WHERE id = ?`, args: params as (string | number | null)[] });
   }
-  return db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Project;
+  const row = await db.execute({ sql: 'SELECT * FROM projects WHERE id = ?', args: [id] });
+  return row.rows[0] as unknown as Project;
 }
 
 export async function deleteProject(id: number): Promise<void> {
-  getDb().prepare('DELETE FROM projects WHERE id = ?').run(id);
+  const db = await getDb();
+  await db.execute({ sql: 'DELETE FROM projects WHERE id = ?', args: [id] });
 }
 
 // ─── Labels ─────────────────────────────────────────
 
 export async function getLabels(): Promise<Label[]> {
-  return getDb().prepare('SELECT * FROM labels ORDER BY name').all() as Label[];
+  const db = await getDb();
+  const result = await db.execute('SELECT * FROM labels ORDER BY name');
+  return result.rows as unknown as Label[];
 }
 
 export async function createLabel(data: { name: string; color?: string }): Promise<Label> {
-  const db = getDb();
-  const result = db.prepare('INSERT INTO labels (name, color) VALUES (?, ?)').run(data.name, data.color || '#6366f1');
-  return db.prepare('SELECT * FROM labels WHERE id = ?').get(result.lastInsertRowid) as Label;
+  const db = await getDb();
+  const result = await db.execute({ sql: 'INSERT INTO labels (name, color) VALUES (?, ?)', args: [data.name, data.color || '#6366f1'] });
+  const row = await db.execute({ sql: 'SELECT * FROM labels WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  return row.rows[0] as unknown as Label;
 }
 
 export async function updateLabel(id: number, data: { name?: string; color?: string }): Promise<Label> {
-  const db = getDb();
+  const db = await getDb();
   const fields: string[] = [];
   const params: unknown[] = [];
   if (data.name !== undefined) { fields.push('name = ?'); params.push(data.name); }
   if (data.color !== undefined) { fields.push('color = ?'); params.push(data.color); }
   if (fields.length) {
     params.push(id);
-    db.prepare(`UPDATE labels SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+    await db.execute({ sql: `UPDATE labels SET ${fields.join(', ')} WHERE id = ?`, args: params as (string | number | null)[] });
   }
-  return db.prepare('SELECT * FROM labels WHERE id = ?').get(id) as Label;
+  const row = await db.execute({ sql: 'SELECT * FROM labels WHERE id = ?', args: [id] });
+  return row.rows[0] as unknown as Label;
 }
 
 export async function deleteLabel(id: number): Promise<void> {
-  getDb().prepare('DELETE FROM labels WHERE id = ?').run(id);
+  const db = await getDb();
+  await db.execute({ sql: 'DELETE FROM labels WHERE id = ?', args: [id] });
 }
 
 // ─── Saved Views ────────────────────────────────────
 
 export async function getSavedViews(): Promise<SavedView[]> {
-  const db = getDb();
-  const rows = db.prepare('SELECT * FROM views ORDER BY name').all() as { id: number; name: string; filters: string; sort: string; project_id: number | null }[];
-  return rows.map(r => ({
-    id: r.id,
-    name: r.name,
-    filters: JSON.parse(r.filters),
-    sort: JSON.parse(r.sort),
-    project_id: r.project_id,
+  const db = await getDb();
+  const result = await db.execute('SELECT * FROM views ORDER BY name');
+  return result.rows.map(r => ({
+    id: r.id as number,
+    name: r.name as string,
+    filters: JSON.parse(r.filters as string),
+    sort: JSON.parse(r.sort as string),
+    project_id: r.project_id as number | null,
   }));
 }
 
 export async function createSavedView(data: { name: string; filters: ViewFilters; sort: ViewSort; project_id?: number | null }): Promise<SavedView> {
-  const db = getDb();
-  const result = db.prepare('INSERT INTO views (name, filters, sort, project_id) VALUES (?, ?, ?, ?)').run(
-    data.name, JSON.stringify(data.filters), JSON.stringify(data.sort), data.project_id ?? null
-  );
-  const row = db.prepare('SELECT * FROM views WHERE id = ?').get(result.lastInsertRowid) as { id: number; name: string; filters: string; sort: string; project_id: number | null };
-  return { ...row, filters: JSON.parse(row.filters), sort: JSON.parse(row.sort) };
+  const db = await getDb();
+  const result = await db.execute({
+    sql: 'INSERT INTO views (name, filters, sort, project_id) VALUES (?, ?, ?, ?)',
+    args: [data.name, JSON.stringify(data.filters), JSON.stringify(data.sort), data.project_id ?? null],
+  });
+  const row = await db.execute({ sql: 'SELECT * FROM views WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  const r = row.rows[0];
+  return { id: r.id as number, name: r.name as string, filters: JSON.parse(r.filters as string), sort: JSON.parse(r.sort as string), project_id: r.project_id as number | null };
 }
 
 export async function deleteSavedView(id: number): Promise<void> {
-  getDb().prepare('DELETE FROM views WHERE id = ?').run(id);
+  const db = await getDb();
+  await db.execute({ sql: 'DELETE FROM views WHERE id = ?', args: [id] });
 }
 
 // ─── Dashboard Stats ────────────────────────────────
 
 export async function getDashboardStats() {
-  const db = getDb();
-  const total = (db.prepare('SELECT COUNT(*) as c FROM items').get() as { c: number }).c;
-  const byStatus = db.prepare('SELECT status, COUNT(*) as count FROM items GROUP BY status').all() as { status: string; count: number }[];
-  const byPriority = db.prepare('SELECT priority, COUNT(*) as count FROM items GROUP BY priority').all() as { priority: string; count: number }[];
-  const recent = db.prepare('SELECT * FROM items ORDER BY created_at DESC LIMIT 5').all() as Item[];
-  const upcoming = db.prepare("SELECT * FROM items WHERE due_date IS NOT NULL AND status NOT IN ('done','cancelled') ORDER BY due_date ASC LIMIT 5").all() as Item[];
-  const inProgress = (db.prepare("SELECT COUNT(*) as c FROM items WHERE status = 'in_progress'").get() as { c: number }).c;
+  const db = await getDb();
+  const totalResult = await db.execute('SELECT COUNT(*) as c FROM items');
+  const total = Number(totalResult.rows[0].c);
+  const byStatusResult = await db.execute('SELECT status, COUNT(*) as count FROM items GROUP BY status');
+  const byStatus = byStatusResult.rows as unknown as { status: string; count: number }[];
+  const byPriorityResult = await db.execute('SELECT priority, COUNT(*) as count FROM items GROUP BY priority');
+  const byPriority = byPriorityResult.rows as unknown as { priority: string; count: number }[];
+  const recentResult = await db.execute('SELECT * FROM items ORDER BY created_at DESC LIMIT 5');
+  const recent = recentResult.rows as unknown as Item[];
+  const upcomingResult = await db.execute("SELECT * FROM items WHERE due_date IS NOT NULL AND status NOT IN ('done','cancelled') ORDER BY due_date ASC LIMIT 5");
+  const upcoming = upcomingResult.rows as unknown as Item[];
+  const inProgressResult = await db.execute("SELECT COUNT(*) as c FROM items WHERE status = 'in_progress'");
+  const inProgress = Number(inProgressResult.rows[0].c);
 
   return { total, byStatus, byPriority, recent, upcoming, inProgress };
 }

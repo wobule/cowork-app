@@ -3,7 +3,7 @@ import { getAllAgents } from '@/lib/db';
 
 export async function GET() {
   try {
-    const agents = getAllAgents();
+    const agents = await getAllAgents();
     // Map DB fields to frontend expected format
     const mapped = (agents as Record<string, unknown>[]).map((a) => ({
       id: a.id,

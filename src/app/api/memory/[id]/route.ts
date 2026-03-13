@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, getMemoryEntry } from '@/lib/db';
+import { getMemoryEntry, deleteMemoryEntry } from '@/lib/db';
 import fs from 'fs';
 
 export async function GET(
@@ -8,7 +8,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const entry = getMemoryEntry(Number(id)) as Record<string, unknown> | undefined;
+    const entry = await getMemoryEntry(Number(id)) as Record<string, unknown> | null;
 
     if (!entry) {
       return NextResponse.json({ error: '找不到記憶項目' }, { status: 404 });
@@ -50,9 +50,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const db = getDb();
-
-    const entry = getMemoryEntry(Number(id)) as Record<string, unknown> | undefined;
+    const entry = await getMemoryEntry(Number(id)) as Record<string, unknown> | null;
 
     if (!entry) {
       return NextResponse.json({ error: '找不到記憶項目' }, { status: 404 });
@@ -69,7 +67,7 @@ export async function DELETE(
       }
     }
 
-    db.prepare('DELETE FROM memory_entries WHERE id = ?').run(Number(id));
+    await deleteMemoryEntry(Number(id));
 
     return NextResponse.json({ success: true });
   } catch (error) {

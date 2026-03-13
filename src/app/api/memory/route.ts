@@ -13,7 +13,7 @@ function slugify(text: string): string {
 
 export async function GET() {
   try {
-    const entries = getAllMemoryEntries();
+    const entries = await getAllMemoryEntries();
     // Map to frontend expected format
     const mapped = (entries as Record<string, unknown>[]).map((e) => {
       const content = (e.content as string) || '';
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     const typeMap: Record<string, string> = { '對話': 'conversation', '日誌': 'journal', '筆記': 'note' };
     const entryType = typeMap[body.type] || body.entry_type || 'conversation';
 
-    const entry = createMemoryEntry({
+    const entry = await createMemoryEntry({
       agent_id: body.agent_id,
       agent_name: body.agent || body.agent_name || '',
       title: body.title,

@@ -7,7 +7,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const agent = getAgent(id);
+    const agent = await getAgent(id);
 
     if (!agent) {
       return NextResponse.json({ error: '找不到代理人' }, { status: 404 });
@@ -27,7 +27,7 @@ export async function PUT(
     const { id } = await params;
     const body = await request.json();
 
-    const existing = getAgent(id);
+    const existing = await getAgent(id);
     if (!existing) {
       return NextResponse.json({ error: '找不到代理人' }, { status: 404 });
     }
@@ -43,7 +43,7 @@ export async function PUT(
     if (body.status !== undefined) dbData.status = body.status;
     if (body.current_task_id !== undefined) dbData.current_task_id = body.current_task_id;
 
-    const agent = updateAgent(id, dbData);
+    const agent = await updateAgent(id, dbData);
     // Return mapped format
     const a = agent as Record<string, unknown>;
     return NextResponse.json({

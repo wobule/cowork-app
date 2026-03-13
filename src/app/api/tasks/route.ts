@@ -1,20 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllTasks, createTask, getDb, getSubTaskCount } from '@/lib/db';
+import { getAllTasks, createTask, getAgentByName, getSubTaskCount } from '@/lib/db';
 
-function resolveAssigneeId(body: Record<string, unknown>): string | null {
+async function resolveAssigneeId(body: Record<string, unknown>): Promise<string | null> {
   if (body.assignee_id) return body.assignee_id as string;
   if (body.assignee) {
-    const db = getDb();
-    const agent = db.prepare('SELECT id FROM agents WHERE name = ?').get(body.assignee as string) as { id: string } | undefined;
-    return agent?.id ?? null;
+    const agent = await getAgentByName(body.assignee as string);
+    return (agent?.id as string) ?? null;
   }
   return null;
 }
 
 export async function GET() {
   try {
-    const tasks = getAllTasks();
-    const mapped = (tasks as Record<string, unknown>[]).map((t) => ({
+    const tasks = await getAllTasks();
+    const mapped = await Promise.all((tasks as Record<string, unknown>[]).map(async (t) => ({
       id: t.id,
       title: t.title,
       description: t.description,
@@ -27,10 +26,10 @@ export async function GET() {
       labels: [],
       parentTaskId: t.parent_task_id || null,
       createdByAgentId: t.created_by_agent_id || null,
-      subtaskCount: t.id ? getSubTaskCount(t.id as string) : 0,
+      subtaskCount: t.id ? await getSubTaskCount(t.id as string) : 0,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
-    }));
+    })));
     return NextResponse.json(mapped);
   } catch (error) {
     return NextResponse.json({ error: '取得任務失敗' }, { status: 500 });
@@ -45,9 +44,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '任務標題為必填欄位' }, { status: 400 });
     }
 
-    const assigneeId = resolveAssigneeId(body);
+    const assigneeId = await resolveAssigneeId(body);
 
-    const task = createTask({
+    const task = await createTask({
       title: body.title,
       description: body.description,
       status: body.status,

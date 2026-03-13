@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, updateTask, createActivity } from '@/lib/db';
+import { updateTask, createActivity, getTaskById } from '@/lib/db';
 
 export async function POST(
   request: NextRequest,
@@ -7,9 +7,8 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const db = getDb();
 
-    const existingTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    const existingTask = await getTaskById(id) as Record<string, unknown> | null;
 
     if (!existingTask) {
       return NextResponse.json({ error: '找不到任務' }, { status: 404 });
@@ -19,9 +18,9 @@ export async function POST(
       return NextResponse.json({ error: '只有審核中的任務可以核准' }, { status: 400 });
     }
 
-    const task = updateTask(id, { status: 'done' });
+    const task = await updateTask(id, { status: 'done' });
 
-    createActivity({
+    await createActivity({
       agent_id: 'user',
       agent_name: '你',
       agent_color: '#22c55e',

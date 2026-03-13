@@ -1,29 +1,34 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { createClient, type Client } from '@libsql/client';
 import crypto from 'crypto';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'mission-control.db');
+let client: Client | null = null;
 
-let db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!db) {
-    // Ensure data directory exists
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    migrate(db);
+function getClient(): Client {
+  if (!client) {
+    const url = process.env.TURSO_DATABASE_URL || 'file:data/mission-control.db';
+    client = createClient({
+      url,
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
   }
-  return db;
+  return client;
 }
 
-function migrate(database: Database.Database) {
-  database.exec(`
+let _initPromise: Promise<void> | null = null;
+
+async function db(): Promise<Client> {
+  if (!_initPromise) {
+    _initPromise = migrate(getClient());
+  }
+  await _initPromise;
+  return getClient();
+}
+
+// Re-export for routes that need raw queries
+export { db as getDb };
+
+async function migrate(c: Client) {
+  await c.executeMultiple(`
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -95,58 +100,69 @@ function migrate(database: Database.Database) {
   `);
 
   // Migration: add subtask columns to tasks
-  const addColumn = (table: string, column: string, definition: string) => {
+  for (const [table, column, definition] of [
+    ['tasks', 'parent_task_id', 'TEXT DEFAULT NULL'],
+    ['tasks', 'created_by_agent_id', 'TEXT DEFAULT NULL'],
+  ]) {
     try {
-      database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      await c.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     } catch {
       // Column already exists — ignore
     }
-  };
-  addColumn('tasks', 'parent_task_id', 'TEXT DEFAULT NULL');
-  addColumn('tasks', 'created_by_agent_id', 'TEXT DEFAULT NULL');
+  }
 
   // Seed agents if empty
-  const count = database.prepare('SELECT COUNT(*) as c FROM agents').get() as { c: number };
-  if (count.c === 0) {
-    seed(database);
+  const result = await c.execute('SELECT COUNT(*) as c FROM agents');
+  if (Number(result.rows[0].c) === 0) {
+    await seed(c);
   }
 }
 
-function seed(database: Database.Database) {
-  const insertAgent = database.prepare(
-    `INSERT INTO agents (id, name, role, avatar, color, model, skills) VALUES (?, ?, ?, ?, ?, ?, ?)`
-  );
+async function seed(c: Client) {
+  const agents = [
+    ['henry', 'Henry', '參謀長', '🎖️', '#6366f1', 'claude-opus-4-0-20250514', JSON.stringify(['策略規劃', '任務協調', '決策分析'])],
+    ['violet', 'Violet', '設計師', '🎨', '#ec4899', 'claude-opus-4-0-20250514', JSON.stringify(['UI設計', '品牌設計', '原型製作'])],
+    ['wendy', 'Wendy', '研究員', '🔬', '#f59e0b', 'claude-sonnet-4-20250514', JSON.stringify(['市場研究', '數據分析', '趨勢追蹤'])],
+    ['jarvis', 'Jarvis', '工程師', '⚙️', '#4c8dff', 'claude-opus-4-0-20250514', JSON.stringify(['全端開發', '系統架構', 'API設計'])],
+  ];
 
-  insertAgent.run('henry', 'Henry', '參謀長', '🎖️', '#6366f1', 'claude-opus-4-0-20250514', JSON.stringify(['策略規劃', '任務協調', '決策分析']));
-  insertAgent.run('violet', 'Violet', '設計師', '🎨', '#ec4899', 'claude-opus-4-0-20250514', JSON.stringify(['UI設計', '品牌設計', '原型製作']));
-  insertAgent.run('wendy', 'Wendy', '研究員', '🔬', '#f59e0b', 'claude-sonnet-4-20250514', JSON.stringify(['市場研究', '數據分析', '趨勢追蹤']));
-  insertAgent.run('jarvis', 'Jarvis', '工程師', '⚙️', '#4c8dff', 'claude-opus-4-0-20250514', JSON.stringify(['全端開發', '系統架構', 'API設計']));
+  for (const a of agents) {
+    await c.execute({
+      sql: 'INSERT INTO agents (id, name, role, avatar, color, model, skills) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: a,
+    });
+  }
 }
 
 // ─── Helper Functions ────────────────────────────────────────────────
 
-export function getAllTasks() {
-  const db = getDb();
-  return db.prepare(`
+export async function getAllTasks() {
+  const c = await db();
+  const result = await c.execute(`
     SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
     FROM tasks t
     LEFT JOIN agents a ON t.assignee_id = a.id
     ORDER BY t.created_at DESC
-  `).all();
+  `);
+  return result.rows;
 }
 
-export function getTasksByStatus(status: string) {
-  const db = getDb();
-  return db.prepare(`
-    SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
-    FROM tasks t
-    LEFT JOIN agents a ON t.assignee_id = a.id
-    WHERE t.status = ?
-    ORDER BY t.created_at DESC
-  `).all(status);
+export async function getTasksByStatus(status: string) {
+  const c = await db();
+  const result = await c.execute({
+    sql: `
+      SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+      FROM tasks t
+      LEFT JOIN agents a ON t.assignee_id = a.id
+      WHERE t.status = ?
+      ORDER BY t.created_at DESC
+    `,
+    args: [status],
+  });
+  return result.rows;
 }
 
-export function createTask(data: {
+export async function createTask(data: {
   title: string;
   description?: string;
   status?: string;
@@ -157,38 +173,45 @@ export function createTask(data: {
   parent_task_id?: string | null;
   created_by_agent_id?: string | null;
 }) {
-  const db = getDb();
+  const c = await db();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee_id, project, project_color, parent_task_id, created_by_agent_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    data.title,
-    data.description ?? '',
-    data.status ?? 'backlog',
-    data.priority ?? 'medium',
-    data.assignee_id ?? null,
-    data.project ?? '',
-    data.project_color ?? '#6366f1',
-    data.parent_task_id ?? null,
-    data.created_by_agent_id ?? null,
-    now,
-    now
-  );
+  await c.execute({
+    sql: `
+      INSERT INTO tasks (id, title, description, status, priority, assignee_id, project, project_color, parent_task_id, created_by_agent_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    args: [
+      id,
+      data.title,
+      data.description ?? '',
+      data.status ?? 'backlog',
+      data.priority ?? 'medium',
+      data.assignee_id ?? null,
+      data.project ?? '',
+      data.project_color ?? '#6366f1',
+      data.parent_task_id ?? null,
+      data.created_by_agent_id ?? null,
+      now,
+      now,
+    ],
+  });
 
-  return db.prepare(`
-    SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
-    FROM tasks t
-    LEFT JOIN agents a ON t.assignee_id = a.id
-    WHERE t.id = ?
-  `).get(id);
+  const result = await c.execute({
+    sql: `
+      SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+      FROM tasks t
+      LEFT JOIN agents a ON t.assignee_id = a.id
+      WHERE t.id = ?
+    `,
+    args: [id],
+  });
+  return result.rows[0];
 }
 
-export function updateTask(id: string, data: Record<string, unknown>) {
-  const db = getDb();
+export async function updateTask(id: string, data: Record<string, unknown>) {
+  const c = await db();
   const allowed = ['title', 'description', 'status', 'priority', 'assignee_id', 'project', 'project_color', 'parent_task_id'];
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -196,43 +219,61 @@ export function updateTask(id: string, data: Record<string, unknown>) {
   for (const key of allowed) {
     if (key in data) {
       fields.push(`${key} = ?`);
-      values.push(data[key]);
+      values.push(data[key] as string | number | null);
     }
   }
 
-  if (fields.length === 0) return db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  if (fields.length === 0) {
+    const result = await c.execute({ sql: 'SELECT * FROM tasks WHERE id = ?', args: [id] });
+    return result.rows[0];
+  }
 
   fields.push(`updated_at = ?`);
   values.push(new Date().toISOString());
   values.push(id);
 
-  db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  await c.execute({
+    sql: `UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as (string | number | null)[],
+  });
 
-  return db.prepare(`
-    SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
-    FROM tasks t
-    LEFT JOIN agents a ON t.assignee_id = a.id
-    WHERE t.id = ?
-  `).get(id);
+  const result = await c.execute({
+    sql: `
+      SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+      FROM tasks t
+      LEFT JOIN agents a ON t.assignee_id = a.id
+      WHERE t.id = ?
+    `,
+    args: [id],
+  });
+  return result.rows[0];
 }
 
-export function deleteTask(id: string) {
-  const db = getDb();
-  return db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+export async function deleteTask(id: string) {
+  const c = await db();
+  await c.execute({ sql: 'DELETE FROM tasks WHERE id = ?', args: [id] });
 }
 
-export function getAllAgents() {
-  const db = getDb();
-  return db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all();
+export async function getAllAgents() {
+  const c = await db();
+  const result = await c.execute('SELECT * FROM agents ORDER BY created_at ASC');
+  return result.rows;
 }
 
-export function getAgent(id: string) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+export async function getAgent(id: string) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM agents WHERE id = ?', args: [id] });
+  return result.rows[0] ?? null;
 }
 
-export function updateAgent(id: string, data: Record<string, unknown>) {
-  const db = getDb();
+export async function getAgentByName(name: string) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM agents WHERE name = ?', args: [name] });
+  return result.rows[0] ?? null;
+}
+
+export async function updateAgent(id: string, data: Record<string, unknown>) {
+  const c = await db();
   const allowed = ['role', 'description', 'model', 'skills', 'poll_interval', 'enabled', 'status', 'current_task_id'];
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -240,81 +281,95 @@ export function updateAgent(id: string, data: Record<string, unknown>) {
   for (const key of allowed) {
     if (key in data) {
       fields.push(`${key} = ?`);
-      values.push(key === 'skills' && Array.isArray(data[key]) ? JSON.stringify(data[key]) : data[key]);
+      const val = key === 'skills' && Array.isArray(data[key]) ? JSON.stringify(data[key]) : data[key];
+      values.push(val as string | number | null);
     }
   }
 
-  if (fields.length === 0) return db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  if (fields.length === 0) {
+    const result = await c.execute({ sql: 'SELECT * FROM agents WHERE id = ?', args: [id] });
+    return result.rows[0];
+  }
 
   fields.push(`updated_at = ?`);
   values.push(new Date().toISOString());
   values.push(id);
 
-  db.prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  await c.execute({
+    sql: `UPDATE agents SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as (string | number | null)[],
+  });
 
-  return db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  const result = await c.execute({ sql: 'SELECT * FROM agents WHERE id = ?', args: [id] });
+  return result.rows[0];
 }
 
-export function getActivities(limit = 50) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM activities ORDER BY created_at DESC LIMIT ?').all(limit);
+export async function getActivities(limit = 50) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM activities ORDER BY created_at DESC LIMIT ?', args: [limit] });
+  return result.rows;
 }
 
-export function createActivity(data: {
+export async function createActivity(data: {
   agent_id: string;
   agent_name: string;
   agent_color?: string;
   message: string;
   task_id?: string | null;
 }) {
-  const db = getDb();
-  const result = db.prepare(`
-    INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    data.agent_id,
-    data.agent_name,
-    data.agent_color ?? '#6366f1',
-    data.message,
-    data.task_id ?? null
-  );
+  const c = await db();
+  const result = await c.execute({
+    sql: 'INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id) VALUES (?, ?, ?, ?, ?)',
+    args: [
+      data.agent_id,
+      data.agent_name,
+      data.agent_color ?? '#6366f1',
+      data.message,
+      data.task_id ?? null,
+    ],
+  });
 
-  return db.prepare('SELECT * FROM activities WHERE id = ?').get(result.lastInsertRowid);
+  const row = await c.execute({ sql: 'SELECT * FROM activities WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  return row.rows[0];
 }
 
 // ─── Settings ───────────────────────────────────────────────────────
 
-export function getSetting(key: string): string | null {
-  const db = getDb();
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
-  return row?.value ?? null;
+export async function getSetting(key: string): Promise<string | null> {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
+  return (result.rows[0]?.value as string) ?? null;
 }
 
-export function setSetting(key: string, value: string) {
-  const db = getDb();
-  db.prepare(`
-    INSERT INTO settings (key, value, updated_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-  `).run(key, value, new Date().toISOString());
+export async function setSetting(key: string, value: string) {
+  const c = await db();
+  await c.execute({
+    sql: `
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `,
+    args: [key, value, new Date().toISOString()],
+  });
 }
 
-export function getAllSettings(): Record<string, string> {
-  const db = getDb();
-  const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
-  const result: Record<string, string> = {};
-  for (const r of rows) result[r.key] = r.value;
-  return result;
+export async function getAllSettings(): Promise<Record<string, string>> {
+  const c = await db();
+  const result = await c.execute('SELECT key, value FROM settings');
+  const out: Record<string, string> = {};
+  for (const r of result.rows) out[r.key as string] = r.value as string;
+  return out;
 }
 
 // ─── Task Comments ──────────────────────────────────────────────────
 
-export function getTaskComments(taskId: string) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC').all(taskId);
+export async function getTaskComments(taskId: string) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC', args: [taskId] });
+  return result.rows;
 }
 
-export function createTaskComment(data: {
+export async function createTaskComment(data: {
   task_id: string;
   agent_id?: string | null;
   agent_name?: string;
@@ -322,34 +377,37 @@ export function createTaskComment(data: {
   role?: string;
   content: string;
 }) {
-  const db = getDb();
-  const result = db.prepare(`
-    INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    data.task_id,
-    data.agent_id ?? null,
-    data.agent_name ?? '',
-    data.agent_color ?? '#6366f1',
-    data.role ?? 'agent',
-    data.content,
-    new Date().toISOString()
-  );
+  const c = await db();
+  const result = await c.execute({
+    sql: 'INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    args: [
+      data.task_id,
+      data.agent_id ?? null,
+      data.agent_name ?? '',
+      data.agent_color ?? '#6366f1',
+      data.role ?? 'agent',
+      data.content,
+      new Date().toISOString(),
+    ],
+  });
 
-  return db.prepare('SELECT * FROM task_comments WHERE id = ?').get(result.lastInsertRowid);
+  const row = await c.execute({ sql: 'SELECT * FROM task_comments WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  return row.rows[0];
 }
 
-export function getTaskActivities(taskId: string) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM activities WHERE task_id = ? ORDER BY created_at ASC').all(taskId);
+export async function getTaskActivities(taskId: string) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM activities WHERE task_id = ? ORDER BY created_at ASC', args: [taskId] });
+  return result.rows;
 }
 
-export function getAllMemoryEntries() {
-  const db = getDb();
-  return db.prepare('SELECT * FROM memory_entries ORDER BY created_at DESC').all();
+export async function getAllMemoryEntries() {
+  const c = await db();
+  const result = await c.execute('SELECT * FROM memory_entries ORDER BY created_at DESC');
+  return result.rows;
 }
 
-export function createMemoryEntry(data: {
+export async function createMemoryEntry(data: {
   agent_id?: string | null;
   agent_name?: string;
   title: string;
@@ -357,80 +415,111 @@ export function createMemoryEntry(data: {
   file_path?: string | null;
   entry_type?: string;
 }) {
-  const db = getDb();
+  const c = await db();
   const now = new Date().toISOString();
 
-  const result = db.prepare(`
-    INSERT INTO memory_entries (agent_id, agent_name, title, content, file_path, entry_type, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    data.agent_id ?? null,
-    data.agent_name ?? '',
-    data.title,
-    data.content ?? '',
-    data.file_path ?? null,
-    data.entry_type ?? 'conversation',
-    now,
-    now
-  );
+  const result = await c.execute({
+    sql: 'INSERT INTO memory_entries (agent_id, agent_name, title, content, file_path, entry_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [
+      data.agent_id ?? null,
+      data.agent_name ?? '',
+      data.title,
+      data.content ?? '',
+      data.file_path ?? null,
+      data.entry_type ?? 'conversation',
+      now,
+      now,
+    ],
+  });
 
-  return db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(result.lastInsertRowid);
+  const row = await c.execute({ sql: 'SELECT * FROM memory_entries WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+  return row.rows[0];
 }
 
-export function getMemoryEntry(id: number) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(id);
+export async function getMemoryEntry(id: number) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM memory_entries WHERE id = ?', args: [id] });
+  return result.rows[0] ?? null;
+}
+
+export async function deleteMemoryEntry(id: number) {
+  const c = await db();
+  await c.execute({ sql: 'DELETE FROM memory_entries WHERE id = ?', args: [id] });
 }
 
 // ─── Subtasks ────────────────────────────────────────────────────────
 
-export function getSubTasks(parentId: string) {
-  const db = getDb();
-  return db.prepare(`
-    SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
-    FROM tasks t
-    LEFT JOIN agents a ON t.assignee_id = a.id
-    WHERE t.parent_task_id = ?
-    ORDER BY t.created_at ASC
-  `).all(parentId);
+export async function getSubTasks(parentId: string) {
+  const c = await db();
+  const result = await c.execute({
+    sql: `
+      SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+      FROM tasks t
+      LEFT JOIN agents a ON t.assignee_id = a.id
+      WHERE t.parent_task_id = ?
+      ORDER BY t.created_at ASC
+    `,
+    args: [parentId],
+  });
+  return result.rows;
 }
 
-export function getSubTaskCount(parentId: string): number {
-  const db = getDb();
-  const row = db.prepare('SELECT COUNT(*) as c FROM tasks WHERE parent_task_id = ?').get(parentId) as { c: number };
-  return row.c;
+export async function getSubTaskCount(parentId: string): Promise<number> {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT COUNT(*) as c FROM tasks WHERE parent_task_id = ?', args: [parentId] });
+  return Number(result.rows[0].c);
+}
+
+// ─── Raw query helpers for routes ────────────────────────────────────
+
+export async function getTaskById(id: string) {
+  const c = await db();
+  const result = await c.execute({ sql: 'SELECT * FROM tasks WHERE id = ?', args: [id] });
+  return result.rows[0] ?? null;
+}
+
+export async function getTaskWithAssignee(id: string) {
+  const c = await db();
+  const result = await c.execute({
+    sql: `
+      SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+      FROM tasks t
+      LEFT JOIN agents a ON t.assignee_id = a.id
+      WHERE t.id = ?
+    `,
+    args: [id],
+  });
+  return result.rows[0] ?? null;
 }
 
 // ─── Team Context ────────────────────────────────────────────────────
 
-export function getTeamContext(): string {
-  const db = getDb();
+export async function getTeamContext(): Promise<string> {
+  const c = await db();
 
-  const agents = db.prepare(`
+  const agentsResult = await c.execute(`
     SELECT a.*, t.title as current_task_title
     FROM agents a
     LEFT JOIN tasks t ON a.current_task_id = t.id
     WHERE a.enabled = 1
     ORDER BY a.created_at ASC
-  `).all() as Record<string, unknown>[];
+  `);
 
-  const taskCounts = db.prepare(`
-    SELECT status, COUNT(*) as c FROM tasks GROUP BY status
-  `).all() as { status: string; c: number }[];
+  const taskCountsResult = await c.execute('SELECT status, COUNT(*) as c FROM tasks GROUP BY status');
 
   const statusMap: Record<string, number> = {};
-  for (const row of taskCounts) {
-    statusMap[row.status] = row.c;
+  for (const row of taskCountsResult.rows) {
+    statusMap[row.status as string] = Number(row.c);
   }
 
   let context = '## 團隊成員\n';
-  for (const a of agents) {
+  for (const a of agentsResult.rows) {
     const skills = (() => {
       try {
         return typeof a.skills === 'string' ? JSON.parse(a.skills as string) : (a.skills || []);
       } catch { return []; }
     })();
-    const skillsStr = skills.length ? `技能：${skills.join('、')}` : '';
+    const skillsStr = (skills as string[]).length ? `技能：${(skills as string[]).join('、')}` : '';
     const statusStr = a.status === 'working' && a.current_task_title
       ? `正在處理：「${a.current_task_title}」`
       : '閒置中';

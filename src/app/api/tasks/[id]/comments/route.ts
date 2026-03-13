@@ -8,7 +8,7 @@ export async function GET(
   try {
     const { id } = await params;
 
-    const comments = (getTaskComments(id) as Record<string, unknown>[]).map((c) => ({
+    const comments = (await getTaskComments(id) as Record<string, unknown>[]).map((c) => ({
       id: c.id,
       taskId: c.task_id,
       agentId: c.agent_id,
@@ -20,7 +20,7 @@ export async function GET(
       type: 'comment',
     }));
 
-    const activities = (getTaskActivities(id) as Record<string, unknown>[]).map((a) => ({
+    const activities = (await getTaskActivities(id) as Record<string, unknown>[]).map((a) => ({
       id: `activity-${a.id}`,
       taskId: a.task_id,
       agentId: a.agent_id,
@@ -65,7 +65,7 @@ export async function POST(
 
     // Save the user's message
     // The worker process (worker.mjs) will detect this and trigger an AI reply
-    const comment = createTaskComment({
+    const comment = await createTaskComment({
       task_id: id,
       agent_id: body.agent_id ?? null,
       agent_name: body.agent_name ?? '你',
