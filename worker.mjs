@@ -8,6 +8,7 @@
 import { execFileSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,55 @@ function getDb() {
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
   return db;
+}
+
+// ---------------------------------------------------------------------------
+// Team context helper
+// ---------------------------------------------------------------------------
+
+function getTeamContext(db) {
+  const agents = db.prepare(`
+    SELECT a.*, t.title as current_task_title
+    FROM agents a
+    LEFT JOIN tasks t ON a.current_task_id = t.id
+    WHERE a.enabled = 1
+    ORDER BY a.created_at ASC
+  `).all();
+
+  const taskCounts = db.prepare(`
+    SELECT status, COUNT(*) as c FROM tasks GROUP BY status
+  `).all();
+
+  const statusMap = {};
+  for (const row of taskCounts) {
+    statusMap[row.status] = row.c;
+  }
+
+  let context = '## 團隊成員\n';
+  for (const a of agents) {
+    const skills = (() => {
+      try {
+        return typeof a.skills === 'string' ? JSON.parse(a.skills) : (a.skills || []);
+      } catch { return []; }
+    })();
+    const skillsStr = skills.length ? `技能：${skills.join('、')}` : '';
+    const statusStr = a.status === 'working' && a.current_task_title
+      ? `正在處理：「${a.current_task_title}」`
+      : '閒置中';
+    context += `- ${a.name}（${a.role}）— ${skillsStr} — ${statusStr}\n`;
+  }
+
+  context += '\n## 看板概況\n';
+  const statusLabels = {
+    backlog: '待處理', in_progress: '進行中', review: '待檢查', done: '已完成', recurring: '週期性',
+  };
+  for (const [key, label] of Object.entries(statusLabels)) {
+    if (statusMap[key]) {
+      context += `- ${label}：${statusMap[key]} 個任務\n`;
+    }
+  }
+
+  return context;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +125,7 @@ function getModel(dbModel) {
 // Build agent prompt
 // ---------------------------------------------------------------------------
 
-function buildPrompt(agent, task, existingComments) {
+function buildPrompt(agent, task, existingComments, teamContext) {
   const skills = (() => {
     try {
       return typeof agent.skills === 'string' ? JSON.parse(agent.skills) : (agent.skills || []);
@@ -99,6 +149,33 @@ ${skillsList}
 
 ---
 
+## 目前的團隊狀況
+${teamContext || '（無法取得團隊狀態）'}
+
+---
+
+## 團隊協作工具
+你可以在回覆中使用以下指令來與團隊互動。每個指令需要放在獨立的 \`\`\`action 區塊中。
+
+### 建立子任務給同事
+\`\`\`action
+{"action": "create_subtask", "title": "子任務標題", "assignee": "Agent名字", "description": "任務描述", "priority": "medium"}
+\`\`\`
+
+### 發送訊息給同事
+\`\`\`action
+{"action": "send_message", "to": "Agent名字", "message": "訊息內容"}
+\`\`\`
+
+### 請求同事審核
+\`\`\`action
+{"action": "request_review", "reviewer": "Agent名字", "message": "請幫我看看這個..."}
+\`\`\`
+
+注意：你可以在同一份報告中使用多個指令。只有在確實需要協作時才使用這些工具。
+
+---
+
 ## 任務
 **${task.title}**
 
@@ -119,6 +196,130 @@ ${skillsList}
   }
 
   return prompt;
+}
+
+// ---------------------------------------------------------------------------
+// Parse and execute agent actions
+// ---------------------------------------------------------------------------
+
+function parseAndExecuteActions(db, output, agentId, agentName, agentColor, parentTaskId) {
+  const actionRegex = /```action\s*\n([\s\S]*?)```/g;
+  const actions = [];
+  let match;
+
+  while ((match = actionRegex.exec(output)) !== null) {
+    try {
+      actions.push(JSON.parse(match[1].trim()));
+    } catch (e) {
+      console.log(`  ⚠️ Failed to parse action JSON: ${e.message}`);
+    }
+  }
+
+  if (actions.length === 0) return output;
+
+  const now = () => new Date().toISOString();
+  let subtaskCount = 0;
+  const MAX_SUBTASKS = 5;
+
+  for (const action of actions) {
+    try {
+      switch (action.action) {
+        case 'create_subtask': {
+          if (subtaskCount >= MAX_SUBTASKS) {
+            console.log(`  ⚠️ Subtask limit (${MAX_SUBTASKS}) reached, skipping`);
+            break;
+          }
+
+          // Check subtask depth: don't allow more than 2 levels
+          const parentTask = db.prepare('SELECT parent_task_id FROM tasks WHERE id = ?').get(parentTaskId);
+          if (parentTask?.parent_task_id) {
+            const grandParent = db.prepare('SELECT parent_task_id FROM tasks WHERE id = ?').get(parentTask.parent_task_id);
+            if (grandParent?.parent_task_id) {
+              console.log(`  ⚠️ Max subtask depth (2) reached, skipping`);
+              break;
+            }
+          }
+
+          // Resolve assignee
+          const assignee = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.assignee);
+          if (!assignee) {
+            console.log(`  ⚠️ Unknown agent "${action.assignee}", skipping subtask`);
+            break;
+          }
+
+          const taskId = crypto.randomUUID();
+          db.prepare(`
+            INSERT INTO tasks (id, title, description, status, priority, assignee_id, parent_task_id, created_by_agent_id, created_at, updated_at)
+            VALUES (?, ?, ?, 'backlog', ?, ?, ?, ?, ?, ?)
+          `).run(
+            taskId,
+            action.title,
+            action.description || '',
+            action.priority || 'medium',
+            assignee.id,
+            parentTaskId,
+            agentId,
+            now(),
+            now()
+          );
+
+          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
+            .run(agentId, agentName, agentColor, `建立子任務「${action.title}」並指派給 ${assignee.name}`, parentTaskId, now());
+
+          console.log(`  📋 Created subtask "${action.title}" → ${assignee.name}`);
+          subtaskCount++;
+          break;
+        }
+
+        case 'send_message': {
+          const targetAgent = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.to);
+          if (!targetAgent) {
+            console.log(`  ⚠️ Unknown agent "${action.to}", skipping message`);
+            break;
+          }
+
+          // Find target agent's current task, or create a note in activities
+          const targetTask = db.prepare('SELECT current_task_id FROM agents WHERE id = ?').get(targetAgent.id);
+          if (targetTask?.current_task_id) {
+            db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
+              .run(targetTask.current_task_id, agentId, agentName, agentColor, 'agent', `💬 來自 ${agentName} 的訊息：${action.message}`, now());
+          }
+
+          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
+            .run(agentId, agentName, agentColor, `發送訊息給 ${targetAgent.name}：${action.message}`, parentTaskId, now());
+
+          console.log(`  💬 Message sent to ${targetAgent.name}`);
+          break;
+        }
+
+        case 'request_review': {
+          const reviewer = db.prepare('SELECT id, name, color FROM agents WHERE name = ?').get(action.reviewer);
+          if (!reviewer) {
+            console.log(`  ⚠️ Unknown reviewer "${action.reviewer}", skipping`);
+            break;
+          }
+
+          db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
+            .run(parentTaskId, agentId, agentName, agentColor, 'agent', `📝 請 ${reviewer.name} 審核：${action.message || '請幫我檢查這個任務的產出'}`, now());
+
+          db.prepare(`INSERT INTO activities (agent_id, agent_name, agent_color, message, task_id, created_at) VALUES (?,?,?,?,?,?)`)
+            .run(agentId, agentName, agentColor, `請求 ${reviewer.name} 審核任務`, parentTaskId, now());
+
+          console.log(`  📝 Review requested from ${reviewer.name}`);
+          break;
+        }
+
+        default:
+          console.log(`  ⚠️ Unknown action: ${action.action}`);
+      }
+    } catch (e) {
+      console.error(`  ❌ Action execution error:`, e.message);
+    }
+  }
+
+  // Remove action blocks from the output for display
+  const cleanOutput = output.replace(/```action\s*\n[\s\S]*?```/g, '').trim();
+  return cleanOutput;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,14 +348,18 @@ async function processTask(db, agent, task) {
     .map(c => `[${c.role === 'user' ? '使用者' : c.agent_name}]: ${c.content}`);
 
   // Build prompt and call AI
-  const prompt = buildPrompt(agent, task, comments.length > 1 ? comments : undefined);
+  const teamContext = getTeamContext(db);
+  const prompt = buildPrompt(agent, task, comments.length > 1 ? comments : undefined, teamContext);
   const model = getModel(agent.model);
 
   try {
-    const output = await runClaudeCLI(prompt, model);
-    console.log(`  ✅ Got response (${output.length} chars)`);
+    const rawOutput = await runClaudeCLI(prompt, model);
+    console.log(`  ✅ Got response (${rawOutput.length} chars)`);
 
-    // Save output as comment
+    // Parse and execute any agent actions, get cleaned output
+    const output = parseAndExecuteActions(db, rawOutput, agent.id, agent.name, agent.color, task.id);
+
+    // Save cleaned output as comment
     db.prepare(`INSERT INTO task_comments (task_id, agent_id, agent_name, agent_color, role, content, created_at) VALUES (?,?,?,?,?,?,?)`)
       .run(task.id, agent.id, agent.name, agent.color, 'agent', output, now());
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, updateTask, deleteTask, createActivity, getAgent } from '@/lib/db';
+import { getDb, updateTask, deleteTask, createActivity, getAgent, getSubTasks } from '@/lib/db';
 
 function resolveAssigneeId(body: Record<string, unknown>): string | null {
   if (body.assignee_id) return body.assignee_id as string;
@@ -29,7 +29,8 @@ export async function GET(
       return NextResponse.json({ error: '找不到任務' }, { status: 404 });
     }
 
-    return NextResponse.json(task);
+    const subtasks = getSubTasks(id);
+    return NextResponse.json({ ...(task as Record<string, unknown>), subtasks });
   } catch (error) {
     return NextResponse.json({ error: '取得任務失敗' }, { status: 500 });
   }
