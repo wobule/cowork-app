@@ -17,6 +17,9 @@ interface Task {
   project: string;
   projectColor: string;
   labels: { name: string; color: string }[];
+  parentTaskId?: string | null;
+  createdByAgentId?: string | null;
+  subtaskCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -435,6 +438,20 @@ export default function TasksPage() {
                           <p className="text-[11px] text-[#8b8b9e] mt-2 line-clamp-2 leading-[1.6] ml-[18px]">
                             {task.description}
                           </p>
+                        )}
+
+                        {/* Subtask & parent badges */}
+                        {(task.subtaskCount && task.subtaskCount > 0) ? (
+                          <div className="ml-[18px] mt-2 flex items-center gap-1">
+                            <FileText size={11} className="text-[#6366f1]" />
+                            <span className="text-[11px] text-[#6366f1] font-medium">{task.subtaskCount} 個子任務</span>
+                          </div>
+                        ) : null}
+                        {task.parentTaskId && (
+                          <div className="ml-[18px] mt-2 flex items-center gap-1">
+                            <ArrowRight size={11} className="text-[#5c5c72] rotate-180" />
+                            <span className="text-[11px] text-[#5c5c72]">子任務</span>
+                          </div>
                         )}
 
                         {/* Approve button for review tasks */}

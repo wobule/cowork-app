@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllTasks, createTask, getDb } from '@/lib/db';
+import { getAllTasks, createTask, getDb, getSubTaskCount } from '@/lib/db';
 
 function resolveAssigneeId(body: Record<string, unknown>): string | null {
   if (body.assignee_id) return body.assignee_id as string;
@@ -25,6 +25,9 @@ export async function GET() {
       project: t.project,
       projectColor: t.project_color || t.assignee_color || '#6366f1',
       labels: [],
+      parentTaskId: t.parent_task_id || null,
+      createdByAgentId: t.created_by_agent_id || null,
+      subtaskCount: t.id ? getSubTaskCount(t.id as string) : 0,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
     }));
@@ -52,6 +55,8 @@ export async function POST(request: NextRequest) {
       assignee_id: assigneeId,
       project: body.project,
       project_color: body.project_color,
+      parent_task_id: body.parent_task_id || null,
+      created_by_agent_id: body.created_by_agent_id || null,
     });
 
     return NextResponse.json(task, { status: 201 });

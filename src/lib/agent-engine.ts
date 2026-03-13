@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import path from 'path';
+import { getTeamContext } from './db';
 
 // ---------------------------------------------------------------------------
 // Claude Code CLI path
@@ -36,6 +37,8 @@ function buildSystemPrompt(agent: {
     ? `\n你的專長技能：${agent.skills.join('、')}`
     : '';
 
+  const teamContext = getTeamContext();
+
   return `你是 ${agent.name}，在 Mission Control 團隊中擔任「${agent.role}」。
 ${agent.description || ''}
 ${skillsList}
@@ -45,7 +48,14 @@ ${skillsList}
 - 產出結構化的工作報告，使用 Markdown 格式
 - 包含具體的分析、建議、或產出內容
 - 報告要專業、有深度、實用
-- 直接開始工作，不需要確認或詢問`;
+- 直接開始工作，不需要確認或詢問
+
+---
+
+## 目前的團隊狀況
+${teamContext}
+
+你可以在工作報告中建議將某些工作交給更適合的同事處理。`;
 }
 
 // ---------------------------------------------------------------------------

@@ -94,6 +94,17 @@ function migrate(database: Database.Database) {
     );
   `);
 
+  // Migration: add subtask columns to tasks
+  const addColumn = (table: string, column: string, definition: string) => {
+    try {
+      database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  };
+  addColumn('tasks', 'parent_task_id', 'TEXT DEFAULT NULL');
+  addColumn('tasks', 'created_by_agent_id', 'TEXT DEFAULT NULL');
+
   // Seed agents if empty
   const count = database.prepare('SELECT COUNT(*) as c FROM agents').get() as { c: number };
   if (count.c === 0) {
@@ -143,14 +154,16 @@ export function createTask(data: {
   assignee_id?: string | null;
   project?: string;
   project_color?: string;
+  parent_task_id?: string | null;
+  created_by_agent_id?: string | null;
 }) {
   const db = getDb();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee_id, project, project_color, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, title, description, status, priority, assignee_id, project, project_color, parent_task_id, created_by_agent_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.title,
@@ -160,6 +173,8 @@ export function createTask(data: {
     data.assignee_id ?? null,
     data.project ?? '',
     data.project_color ?? '#6366f1',
+    data.parent_task_id ?? null,
+    data.created_by_agent_id ?? null,
     now,
     now
   );
@@ -174,7 +189,7 @@ export function createTask(data: {
 
 export function updateTask(id: string, data: Record<string, unknown>) {
   const db = getDb();
-  const allowed = ['title', 'description', 'status', 'priority', 'assignee_id', 'project', 'project_color'];
+  const allowed = ['title', 'description', 'status', 'priority', 'assignee_id', 'project', 'project_color', 'parent_task_id'];
   const fields: string[] = [];
   const values: unknown[] = [];
 
@@ -365,4 +380,72 @@ export function createMemoryEntry(data: {
 export function getMemoryEntry(id: number) {
   const db = getDb();
   return db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(id);
+}
+
+// ─── Subtasks ────────────────────────────────────────────────────────
+
+export function getSubTasks(parentId: string) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar, a.color as assignee_color
+    FROM tasks t
+    LEFT JOIN agents a ON t.assignee_id = a.id
+    WHERE t.parent_task_id = ?
+    ORDER BY t.created_at ASC
+  `).all(parentId);
+}
+
+export function getSubTaskCount(parentId: string): number {
+  const db = getDb();
+  const row = db.prepare('SELECT COUNT(*) as c FROM tasks WHERE parent_task_id = ?').get(parentId) as { c: number };
+  return row.c;
+}
+
+// ─── Team Context ────────────────────────────────────────────────────
+
+export function getTeamContext(): string {
+  const db = getDb();
+
+  const agents = db.prepare(`
+    SELECT a.*, t.title as current_task_title
+    FROM agents a
+    LEFT JOIN tasks t ON a.current_task_id = t.id
+    WHERE a.enabled = 1
+    ORDER BY a.created_at ASC
+  `).all() as Record<string, unknown>[];
+
+  const taskCounts = db.prepare(`
+    SELECT status, COUNT(*) as c FROM tasks GROUP BY status
+  `).all() as { status: string; c: number }[];
+
+  const statusMap: Record<string, number> = {};
+  for (const row of taskCounts) {
+    statusMap[row.status] = row.c;
+  }
+
+  let context = '## 團隊成員\n';
+  for (const a of agents) {
+    const skills = (() => {
+      try {
+        return typeof a.skills === 'string' ? JSON.parse(a.skills as string) : (a.skills || []);
+      } catch { return []; }
+    })();
+    const skillsStr = skills.length ? `技能：${skills.join('、')}` : '';
+    const statusStr = a.status === 'working' && a.current_task_title
+      ? `正在處理：「${a.current_task_title}」`
+      : '閒置中';
+    context += `- ${a.name}（${a.role}）— ${skillsStr} — ${statusStr}\n`;
+  }
+
+  context += '\n## 看板概況\n';
+  const statusLabels: Record<string, string> = {
+    backlog: '待處理', in_progress: '進行中', review: '待檢查', done: '已完成', recurring: '週期性',
+  };
+  for (const [key, label] of Object.entries(statusLabels)) {
+    if (statusMap[key]) {
+      context += `- ${label}：${statusMap[key]} 個任務\n`;
+    }
+  }
+
+  return context;
 }
