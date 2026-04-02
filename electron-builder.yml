@@ -1,0 +1,49 @@
+appId: com.pdfeditor.app
+productName: PDF 編輯器
+copyright: Copyright © 2026
+
+directories:
+  output: dist-electron
+
+files:
+  - "electron/**/*"
+  - ".next/**/*"
+  - "public/**/*"
+  - "src/**/*"
+  - "next.config.ts"
+  - "tsconfig.json"
+  - "postcss.config.mjs"
+  - "package.json"
+  - "node_modules/**/*"
+
+asar: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: public/favicon.ico
+
+nsis:
+  oneClick: true
+  allowToChangeInstallationDirectory: false
+  installerLanguages:
+    - zh_TW
+    - en_US
+  shortcutName: PDF 編輯器
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.productivity
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Office
