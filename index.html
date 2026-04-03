@@ -4,8 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PDF 編輯器</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs" type="module"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/6.6.3/fabric.min.js"></script>
+<script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
+<script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs" type="module"></script>
+<script src="https://unpkg.com/fabric@6.6.3/dist/index.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <style>
 :root {
@@ -232,8 +233,14 @@ input, select { font: inherit; }
 
 <script type="module">
 // ===== PDF.js Setup =====
-const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs');
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+let pdfjsLib;
+try {
+  pdfjsLib = await import('https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs';
+} catch (e) {
+  console.error('PDF.js load failed:', e);
+  document.getElementById('status-name').textContent = 'PDF.js 載入失敗，請檢查網路連線';
+}
 
 // ===== State =====
 const S = {
@@ -334,8 +341,8 @@ async function loadPdf(file, data) {
     renderThumbnails();
     updateStatus();
   } catch (e) {
-    console.error(e);
-    alert('無法載入 PDF 檔案');
+    console.error('PDF load error:', e);
+    alert('無法載入 PDF 檔案: ' + (e.message || e));
   }
 }
 
