@@ -4,9 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PDF 編輯器</title>
-<script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
-<script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs" type="module"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+<script src="https://unpkg.com/fabric@6.6.1/dist/index.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <style>
 :root {
@@ -235,8 +233,8 @@ input, select { font: inherit; }
 // ===== PDF.js Setup =====
 let pdfjsLib;
 try {
-  pdfjsLib = await import('https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs';
+  pdfjsLib = await import('https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.min.mjs');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
 } catch (e) {
   console.error('PDF.js load failed:', e);
   document.getElementById('status-name').textContent = 'PDF.js 載入失敗，請檢查網路連線';
@@ -460,7 +458,7 @@ function applyTool() {
     fc.hoverCursor = 'text';
     fc.forEachObject(o => { o.selectable = false; o.evented = false; });
     const handler = (opt) => {
-      const pointer = fc.getPointer(opt.e);
+      const pointer = fc.getScenePoint(opt.e);
       const text = new fabric.IText('文字', {
         left: pointer.x, top: pointer.y,
         fontSize: S.strokeWidth * 4 + 12,
@@ -480,12 +478,12 @@ function applyTool() {
     fc.hoverCursor = 'crosshair';
     fc.forEachObject(o => { o.selectable = false; o.evented = false; });
     fc.on('mouse:down', (opt) => {
-      const p = fc.getPointer(opt.e);
+      const p = fc.getScenePoint(opt.e);
       S.drawObj = { startX: p.x, startY: p.y, rect: null };
     });
     fc.on('mouse:move', (opt) => {
       if (!S.drawObj) return;
-      const p = fc.getPointer(opt.e);
+      const p = fc.getScenePoint(opt.e);
       const left = Math.min(S.drawObj.startX, p.x);
       const top = Math.min(S.drawObj.startY, p.y);
       const w = Math.abs(p.x - S.drawObj.startX);
