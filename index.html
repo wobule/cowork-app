@@ -622,7 +622,9 @@ async function downloadPdf() {
 
 // File upload
 function handleFile(file) {
-  if (!file || file.type !== 'application/pdf') return;
+  if (!file) return;
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (!isPdf) return;
   const reader = new FileReader();
   reader.onload = () => loadPdf(file, reader.result);
   reader.readAsArrayBuffer(file);
