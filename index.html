@@ -6,7 +6,7 @@
 <title>PDF 編輯器</title>
 <script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
 <script src="https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs" type="module"></script>
-<script src="https://cdn.jsdelivr.net/npm/fabric@6.6.3/dist/fabric.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <style>
 :root {
@@ -460,7 +460,7 @@ function applyTool() {
     fc.hoverCursor = 'text';
     fc.forEachObject(o => { o.selectable = false; o.evented = false; });
     const handler = (opt) => {
-      const pointer = fc.getScenePoint(opt.e);
+      const pointer = fc.getPointer(opt.e);
       const text = new fabric.IText('文字', {
         left: pointer.x, top: pointer.y,
         fontSize: S.strokeWidth * 4 + 12,
@@ -480,12 +480,12 @@ function applyTool() {
     fc.hoverCursor = 'crosshair';
     fc.forEachObject(o => { o.selectable = false; o.evented = false; });
     fc.on('mouse:down', (opt) => {
-      const p = fc.getScenePoint(opt.e);
+      const p = fc.getPointer(opt.e);
       S.drawObj = { startX: p.x, startY: p.y, rect: null };
     });
     fc.on('mouse:move', (opt) => {
       if (!S.drawObj) return;
-      const p = fc.getScenePoint(opt.e);
+      const p = fc.getPointer(opt.e);
       const left = Math.min(S.drawObj.startX, p.x);
       const top = Math.min(S.drawObj.startY, p.y);
       const w = Math.abs(p.x - S.drawObj.startX);
