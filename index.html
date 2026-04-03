@@ -371,7 +371,7 @@ async function renderPage() {
   canvas.style.width = `${viewport.width / dpr}px`;
   canvas.style.height = `${viewport.height / dpr}px`;
 
-  await page.render({ canvas, viewport }).promise;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
 
   // Resize fabric overlay
   if (S.fc) {
@@ -416,7 +416,7 @@ async function renderThumbnails() {
     const c = document.createElement('canvas');
     c.width = vp.width;
     c.height = vp.height;
-    await page.render({ canvas: c, viewport: vp }).promise;
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
     const num = document.createElement('span');
     num.className = 'thumb-num';
     num.textContent = i;
