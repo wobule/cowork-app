@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF 編輯器</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs" type="module"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/6.6.3/fabric.min.js"></script>
+<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<style>
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #111118;
+  --bg-tertiary: #1a1a24;
+  --bg-hover: #252533;
+  --bg-active: #2a2a3a;
+  --border: #2a2a3a;
+  --border-light: #1e1e2a;
+  --text-primary: #e8e8ed;
+  --text-secondary: #8b8b9e;
+  --text-tertiary: #5c5c72;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg-primary); color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; overflow: hidden; }
+button { background: none; border: none; color: inherit; cursor: pointer; font: inherit; }
+input, select { font: inherit; }
+
+/* Layout */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* Toolbar */
+#toolbar {
+  display: flex; align-items: center; gap: 4px; padding: 6px 8px;
+  border-bottom: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0; flex-wrap: wrap;
+}
+.tb { padding: 6px 7px; border-radius: 6px; color: var(--text-secondary); transition: all .15s; display: flex; align-items: center; justify-content: center; }
+.tb:hover { background: var(--bg-hover); color: var(--text-primary); }
+.tb.active { background: var(--bg-active); color: var(--accent); }
+.tb:disabled { opacity: .3; cursor: not-allowed; }
+.tb svg { width: 16px; height: 16px; stroke-width: 1.5; fill: none; stroke: currentColor; }
+.sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+.page-input {
+  width: 40px; text-align: center; background: var(--bg-tertiary); border: 1px solid var(--border-light);
+  border-radius: 4px; padding: 2px 4px; color: var(--text-primary); font-size: 13px;
+  -moz-appearance: textfield;
+}
+.page-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+.page-info { font-size: 13px; color: var(--text-secondary); margin: 0 4px; white-space: nowrap; }
+.zoom-info { font-size: 13px; color: var(--text-secondary); width: 48px; text-align: center; user-select: none; }
+
+/* Colors */
+.color-dot {
+  width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent;
+  transition: transform .15s, border-color .15s; flex-shrink: 0;
+}
+.color-dot.active { border-color: #fff; transform: scale(1.15); }
+.stroke-sel {
+  background: var(--bg-tertiary); border: 1px solid var(--border-light);
+  border-radius: 4px; padding: 2px 4px; font-size: 12px; color: var(--text-secondary); margin-left: 4px;
+}
+
+/* Main area */
+#main { display: flex; flex: 1; overflow: hidden; }
+
+/* Sidebar */
+#sidebar {
+  width: 160px; flex-shrink: 0; background: var(--bg-secondary); border-right: 1px solid var(--border);
+  overflow-y: auto; display: flex; flex-direction: column;
+}
+#sidebar-header { padding: 8px 12px; font-size: 12px; color: var(--text-tertiary); border-bottom: 1px solid var(--border); font-weight: 500; }
+#thumbs { display: flex; flex-direction: column; gap: 8px; padding: 8px; align-items: center; }
+.thumb-btn {
+  position: relative; border-radius: 6px; overflow: hidden; border: 2px solid transparent;
+  transition: border-color .15s; cursor: pointer; background: none; padding: 0;
+}
+.thumb-btn.active { border-color: var(--accent); }
+.thumb-btn:hover:not(.active) { border-color: var(--border); }
+.thumb-btn canvas { display: block; max-width: 136px; }
+.thumb-num {
+  position: absolute; bottom: 4px; right: 4px; font-size: 10px;
+  background: rgba(10,10,15,.8); color: var(--text-secondary); padding: 1px 4px; border-radius: 3px;
+}
+
+/* Canvas area */
+#canvas-area { flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px; background: var(--bg-primary); }
+#canvas-wrap { position: relative; box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+#pdf-canvas { display: block; }
+#fabric-canvas { position: absolute; top: 0; left: 0; }
+
+/* Upload */
+#upload-overlay {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+}
+#upload-box {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  padding: 64px; border-radius: 16px; border: 2px dashed var(--border);
+  transition: border-color .2s, background .2s; cursor: pointer;
+}
+#upload-box:hover, #upload-box.drag { border-color: var(--accent); background: rgba(99,102,241,.08); }
+#upload-box svg { width: 48px; height: 48px; stroke: var(--text-tertiary); stroke-width: 1; fill: none; }
+
+/* Status bar */
+#status-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 12px; border-top: 1px solid var(--border); background: var(--bg-secondary);
+  font-size: 11px; color: var(--text-tertiary); flex-shrink: 0;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Toolbar -->
+  <div id="toolbar">
+    <button class="tb" id="btn-sidebar" title="縮圖面板">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+    </button>
+    <div class="sep"></div>
+    <button class="tb" id="btn-open" title="開啟檔案">
+      <svg viewBox="0 0 24 24"><path d="M5 19a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4l2 2h4a2 2 0 0 1 2 2v1"/><path d="M20.1 11H6.8a2 2 0 0 0-1.9 1.4L3 19h14.1a2 2 0 0 0 1.9-1.4L21 11Z"/></svg>
+    </button>
+    <button class="tb" id="btn-download" title="下載 PDF" disabled>
+      <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    </button>
+    <div class="sep"></div>
+    <button class="tb" id="btn-prev" title="上一頁" disabled>
+      <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <input type="number" class="page-input" id="page-input" value="1" min="1" disabled>
+    <span class="page-info" id="page-info">/ 0</span>
+    <button class="tb" id="btn-next" title="下一頁" disabled>
+      <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+    <div class="sep"></div>
+    <button class="tb" id="btn-zout" title="縮小">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+    </button>
+    <span class="zoom-info" id="zoom-info">100%</span>
+    <button class="tb" id="btn-zin" title="放大">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+    </button>
+    <button class="tb" id="btn-fit" title="適合寬度">
+      <svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+    </button>
+    <div class="sep"></div>
+    <button class="tb active" data-tool="select" title="選取">
+      <svg viewBox="0 0 24 24"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/></svg>
+    </button>
+    <button class="tb" data-tool="highlight" title="螢光筆">
+      <svg viewBox="0 0 24 24"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>
+    </button>
+    <button class="tb" data-tool="text" title="文字">
+      <svg viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+    </button>
+    <button class="tb" data-tool="draw" title="畫筆">
+      <svg viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></svg>
+    </button>
+    <button class="tb" data-tool="rectangle" title="矩形">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+    </button>
+    <button class="tb" data-tool="eraser" title="橡皮擦">
+      <svg viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><line x1="2" y1="21" x2="22" y2="21"/></svg>
+    </button>
+    <div class="sep"></div>
+    <div style="display:flex;align-items:center;gap:3px;">
+      <button class="color-dot active" data-color="#ef4444" style="background:#ef4444;"></button>
+      <button class="color-dot" data-color="#f59e0b" style="background:#f59e0b;"></button>
+      <button class="color-dot" data-color="#34d399" style="background:#34d399;"></button>
+      <button class="color-dot" data-color="#4c8dff" style="background:#4c8dff;"></button>
+      <button class="color-dot" data-color="#6366f1" style="background:#6366f1;"></button>
+      <button class="color-dot" data-color="#8b5cf6" style="background:#8b5cf6;"></button>
+      <button class="color-dot" data-color="#ec4899" style="background:#ec4899;"></button>
+      <button class="color-dot" data-color="#e8e8ed" style="background:#e8e8ed;"></button>
+    </div>
+    <select class="stroke-sel" id="stroke-sel">
+      <option value="1">1px</option>
+      <option value="2" selected>2px</option>
+      <option value="4">4px</option>
+      <option value="8">8px</option>
+    </select>
+    <div class="sep"></div>
+    <button class="tb" id="btn-undo" title="復原 (Ctrl+Z)" disabled>
+      <svg viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+    </button>
+    <button class="tb" id="btn-redo" title="重做 (Ctrl+Shift+Z)" disabled>
+      <svg viewBox="0 0 24 24"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+    </button>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+    <!-- Sidebar -->
+    <div id="sidebar" style="display:none;">
+      <div id="sidebar-header">頁面</div>
+      <div id="thumbs"></div>
+    </div>
+
+    <!-- Upload Overlay -->
+    <div id="upload-overlay">
+      <div id="upload-box">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <div style="text-align:center;">
+          <p style="font-size:16px;font-weight:500;">拖曳 PDF 檔案至此處</p>
+          <p style="font-size:13px;color:var(--text-tertiary);margin-top:4px;">或點擊選擇檔案</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Canvas Area (hidden initially) -->
+    <div id="canvas-area" style="display:none;">
+      <div id="canvas-wrap">
+        <canvas id="pdf-canvas"></canvas>
+        <canvas id="fabric-canvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <span id="status-name">PDF 編輯器</span>
+    <span id="status-info"></span>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept=".pdf,application/pdf" style="display:none;">
+
+<script type="module">
+// ===== PDF.js Setup =====
+const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs');
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+
+// ===== State =====
+const S = {
+  pdfDoc: null,
+  pdfBytes: null,
+  fileName: '',
+  currentPage: 1,
+  totalPages: 0,
+  zoom: 1.0,
+  activeTool: 'select',
+  color: '#ef4444',
+  strokeWidth: 2,
+  sidebarOpen: false,
+  fc: null,               // fabric canvas
+  annotations: new Map(),  // page -> JSON string
+  history: [],
+  historyIdx: -1,
+  isRestoring: false,
+  drawObj: null,
+};
+
+// ===== DOM Refs =====
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+const els = {
+  toolbar: $('#toolbar'),
+  sidebar: $('#sidebar'),
+  thumbs: $('#thumbs'),
+  uploadOverlay: $('#upload-overlay'),
+  uploadBox: $('#upload-box'),
+  canvasArea: $('#canvas-area'),
+  pdfCanvas: $('#pdf-canvas'),
+  fabricCanvas: $('#fabric-canvas'),
+  fileInput: $('#file-input'),
+  pageInput: $('#page-input'),
+  pageInfo: $('#page-info'),
+  zoomInfo: $('#zoom-info'),
+  statusName: $('#status-name'),
+  statusInfo: $('#status-info'),
+};
+
+// ===== Helpers =====
+function updateStatus() {
+  els.statusName.textContent = S.fileName || 'PDF 編輯器';
+  els.statusInfo.textContent = S.totalPages
+    ? `第 ${S.currentPage} 頁，共 ${S.totalPages} 頁 · ${Math.round(S.zoom * 100)}%`
+    : '';
+  els.zoomInfo.textContent = `${Math.round(S.zoom * 100)}%`;
+  els.pageInput.value = S.currentPage;
+  els.pageInput.max = S.totalPages;
+  els.pageInfo.textContent = `/ ${S.totalPages}`;
+
+  $('#btn-prev').disabled = S.currentPage <= 1;
+  $('#btn-next').disabled = S.currentPage >= S.totalPages;
+  $('#btn-download').disabled = !S.pdfDoc;
+  els.pageInput.disabled = !S.pdfDoc;
+  updateUndoRedo();
+}
+
+function updateUndoRedo() {
+  $('#btn-undo').disabled = S.historyIdx <= 0;
+  $('#btn-redo').disabled = S.historyIdx >= S.history.length - 1;
+}
+
+function pushHistory() {
+  if (S.isRestoring || !S.fc) return;
+  const json = JSON.stringify(S.fc.toJSON());
+  S.history = S.history.slice(0, S.historyIdx + 1);
+  S.history.push(json);
+  S.historyIdx = S.history.length - 1;
+  updateUndoRedo();
+}
+
+function saveAnnotations(page) {
+  if (!S.fc) return;
+  S.annotations.set(page, JSON.stringify(S.fc.toJSON()));
+}
+
+// ===== PDF Loading =====
+async function loadPdf(file, data) {
+  try {
+    S.pdfDoc = await pdfjsLib.getDocument({ data: data.slice(0) }).promise;
+    S.pdfBytes = data;
+    S.fileName = file.name;
+    S.totalPages = S.pdfDoc.numPages;
+    S.currentPage = 1;
+    S.zoom = 1.0;
+    S.annotations.clear();
+    S.history = [];
+    S.historyIdx = -1;
+
+    els.uploadOverlay.style.display = 'none';
+    els.canvasArea.style.display = 'flex';
+
+    initFabric();
+    await renderPage();
+    renderThumbnails();
+    updateStatus();
+  } catch (e) {
+    console.error(e);
+    alert('無法載入 PDF 檔案');
+  }
+}
+
+// ===== Fabric.js Init =====
+function initFabric() {
+  if (S.fc) S.fc.dispose();
+  S.fc = new fabric.Canvas(els.fabricCanvas, {
+    isDrawingMode: false,
+    selection: true,
+    width: 100,
+    height: 100,
+  });
+  S.fc.on('object:added', () => pushHistory());
+  S.fc.on('object:modified', () => pushHistory());
+  S.fc.on('object:removed', () => pushHistory());
+  pushHistory();
+}
+
+// ===== Page Rendering =====
+async function renderPage() {
+  if (!S.pdfDoc) return;
+  const page = await S.pdfDoc.getPage(S.currentPage);
+  const dpr = window.devicePixelRatio || 1;
+  const viewport = page.getViewport({ scale: S.zoom * dpr });
+  const canvas = els.pdfCanvas;
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width = `${viewport.width / dpr}px`;
+  canvas.style.height = `${viewport.height / dpr}px`;
+
+  await page.render({ canvas, viewport }).promise;
+
+  // Resize fabric overlay
+  if (S.fc) {
+    const cssW = viewport.width / dpr;
+    const cssH = viewport.height / dpr;
+    S.fc.setDimensions({ width: cssW, height: cssH });
+
+    // Restore annotations
+    const saved = S.annotations.get(S.currentPage);
+    if (saved) {
+      S.isRestoring = true;
+      await S.fc.loadFromJSON(saved);
+      S.fc.renderAll();
+      S.isRestoring = false;
+    }
+
+    S.history = [JSON.stringify(S.fc.toJSON())];
+    S.historyIdx = 0;
+  }
+  updateStatus();
+}
+
+async function changePage(newPage) {
+  if (newPage < 1 || newPage > S.totalPages || newPage === S.currentPage) return;
+  saveAnnotations(S.currentPage);
+  if (S.fc) S.fc.clear();
+  S.currentPage = newPage;
+  await renderPage();
+  applyTool();
+  // highlight thumbnail
+  $$('.thumb-btn').forEach((el, i) => el.classList.toggle('active', i + 1 === S.currentPage));
+}
+
+// ===== Thumbnails =====
+async function renderThumbnails() {
+  els.thumbs.innerHTML = '';
+  for (let i = 1; i <= S.totalPages; i++) {
+    const page = await S.pdfDoc.getPage(i);
+    const vp = page.getViewport({ scale: 0.3 });
+    const btn = document.createElement('button');
+    btn.className = `thumb-btn${i === 1 ? ' active' : ''}`;
+    const c = document.createElement('canvas');
+    c.width = vp.width;
+    c.height = vp.height;
+    await page.render({ canvas: c, viewport: vp }).promise;
+    const num = document.createElement('span');
+    num.className = 'thumb-num';
+    num.textContent = i;
+    btn.appendChild(c);
+    btn.appendChild(num);
+    btn.addEventListener('click', () => changePage(i));
+    els.thumbs.appendChild(btn);
+  }
+}
+
+// ===== Tool Switching =====
+function applyTool() {
+  const fc = S.fc;
+  if (!fc) return;
+  fc.isDrawingMode = false;
+  fc.selection = true;
+  fc.defaultCursor = 'default';
+  fc.hoverCursor = 'move';
+  fc.forEachObject(o => { o.selectable = true; o.evented = true; });
+  fc.off('mouse:down');
+  fc.off('mouse:move');
+  fc.off('mouse:up');
+
+  const t = S.activeTool;
+  if (t === 'draw') {
+    fc.isDrawingMode = true;
+    fc.freeDrawingBrush = new fabric.PencilBrush(fc);
+    fc.freeDrawingBrush.color = S.color;
+    fc.freeDrawingBrush.width = S.strokeWidth;
+  } else if (t === 'highlight') {
+    fc.isDrawingMode = true;
+    fc.freeDrawingBrush = new fabric.PencilBrush(fc);
+    fc.freeDrawingBrush.color = S.color + '4D';
+    fc.freeDrawingBrush.width = S.strokeWidth * 6;
+  } else if (t === 'text') {
+    fc.isDrawingMode = false;
+    fc.selection = false;
+    fc.defaultCursor = 'text';
+    fc.hoverCursor = 'text';
+    fc.forEachObject(o => { o.selectable = false; o.evented = false; });
+    const handler = (opt) => {
+      const pointer = fc.getScenePoint(opt.e);
+      const text = new fabric.IText('文字', {
+        left: pointer.x, top: pointer.y,
+        fontSize: S.strokeWidth * 4 + 12,
+        fill: S.color,
+        fontFamily: 'sans-serif',
+      });
+      fc.add(text);
+      fc.setActiveObject(text);
+      text.enterEditing();
+      fc.off('mouse:down', handler);
+    };
+    fc.on('mouse:down', handler);
+  } else if (t === 'rectangle') {
+    fc.isDrawingMode = false;
+    fc.selection = false;
+    fc.defaultCursor = 'crosshair';
+    fc.hoverCursor = 'crosshair';
+    fc.forEachObject(o => { o.selectable = false; o.evented = false; });
+    fc.on('mouse:down', (opt) => {
+      const p = fc.getScenePoint(opt.e);
+      S.drawObj = { startX: p.x, startY: p.y, rect: null };
+    });
+    fc.on('mouse:move', (opt) => {
+      if (!S.drawObj) return;
+      const p = fc.getScenePoint(opt.e);
+      const left = Math.min(S.drawObj.startX, p.x);
+      const top = Math.min(S.drawObj.startY, p.y);
+      const w = Math.abs(p.x - S.drawObj.startX);
+      const h = Math.abs(p.y - S.drawObj.startY);
+      if (!S.drawObj.rect) {
+        S.drawObj.rect = new fabric.Rect({
+          left, top, width: w, height: h,
+          fill: 'transparent', stroke: S.color,
+          strokeWidth: S.strokeWidth, selectable: false, evented: false,
+        });
+        fc.add(S.drawObj.rect);
+      } else {
+        S.drawObj.rect.set({ left, top, width: w, height: h });
+        fc.renderAll();
+      }
+    });
+    fc.on('mouse:up', () => {
+      if (S.drawObj?.rect) {
+        S.drawObj.rect.set({ selectable: true, evented: true });
+        fc.setActiveObject(S.drawObj.rect);
+        fc.renderAll();
+      }
+      S.drawObj = null;
+    });
+  } else if (t === 'eraser') {
+    fc.isDrawingMode = false;
+    fc.selection = false;
+    fc.defaultCursor = 'not-allowed';
+    fc.hoverCursor = 'not-allowed';
+    fc.on('mouse:down', (opt) => {
+      const target = fc.findTarget(opt.e);
+      if (target && target.type) {
+        fc.remove(target);
+        fc.renderAll();
+      }
+    });
+  }
+
+  // Update toolbar buttons
+  $$('[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
+}
+
+// ===== Undo / Redo =====
+function undo() {
+  if (!S.fc || S.historyIdx <= 0) return;
+  S.historyIdx--;
+  S.isRestoring = true;
+  S.fc.loadFromJSON(S.history[S.historyIdx]).then(() => {
+    S.fc.renderAll();
+    S.isRestoring = false;
+    updateUndoRedo();
+  });
+}
+
+function redo() {
+  if (!S.fc || S.historyIdx >= S.history.length - 1) return;
+  S.historyIdx++;
+  S.isRestoring = true;
+  S.fc.loadFromJSON(S.history[S.historyIdx]).then(() => {
+    S.fc.renderAll();
+    S.isRestoring = false;
+    updateUndoRedo();
+  });
+}
+
+// ===== Download with Annotations =====
+async function downloadPdf() {
+  if (!S.pdfBytes || !S.fc) return;
+  try {
+    saveAnnotations(S.currentPage);
+    const { PDFDocument, rgb } = PDFLib;
+    const pdfLibDoc = await PDFDocument.load(S.pdfBytes);
+
+    const parseColor = (c) => {
+      if (!c) return rgb(1, 0, 0);
+      const hex = c.replace('#', '').substring(0, 6);
+      return rgb(
+        parseInt(hex.substring(0, 2), 16) / 255,
+        parseInt(hex.substring(2, 4), 16) / 255,
+        parseInt(hex.substring(4, 6), 16) / 255
+      );
+    };
+
+    S.annotations.forEach((json, pageNum) => {
+      let parsed;
+      try { parsed = JSON.parse(json); } catch { return; }
+      if (!parsed.objects?.length) return;
+      const page = pdfLibDoc.getPage(pageNum - 1);
+      const { height: pageH } = page.getSize();
+
+      for (const o of parsed.objects) {
+        if (o.type === 'rect') {
+          page.drawRectangle({
+            x: o.left || 0,
+            y: pageH - (o.top || 0) - (o.height || 0),
+            width: o.width || 0,
+            height: o.height || 0,
+            borderColor: parseColor(o.stroke),
+            borderWidth: o.strokeWidth || 1,
+          });
+        } else if (['i-text', 'text', 'textbox'].includes(o.type)) {
+          page.drawText(o.text || '', {
+            x: o.left || 0,
+            y: pageH - (o.top || 0) - (o.fontSize || 16),
+            size: o.fontSize || 16,
+            color: parseColor(o.fill),
+          });
+        } else if (o.type === 'path' && o.path) {
+          const color = parseColor(o.stroke);
+          const sw = o.strokeWidth || 1;
+          const opacity = o.opacity ?? 1;
+          for (const seg of o.path) {
+            for (let i = 0; i < seg.length - 1; i++) {
+              if (seg[i].length >= 2 && seg[i + 1].length >= 2) {
+                page.drawLine({
+                  start: { x: (o.left || 0) + seg[i][0], y: pageH - ((o.top || 0) + seg[i][1]) },
+                  end: { x: (o.left || 0) + seg[i + 1][0], y: pageH - ((o.top || 0) + seg[i + 1][1]) },
+                  thickness: sw, color, opacity,
+                });
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const bytes = await pdfLibDoc.save();
+    const blob = new Blob([bytes.buffer], { type: 'application/pdf' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = S.fileName.replace('.pdf', '') + '_edited.pdf';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    console.error(e);
+    alert('匯出 PDF 失敗');
+  }
+}
+
+// ===== Event Bindings =====
+
+// File upload
+function handleFile(file) {
+  if (!file || file.type !== 'application/pdf') return;
+  const reader = new FileReader();
+  reader.onload = () => loadPdf(file, reader.result);
+  reader.readAsArrayBuffer(file);
+}
+
+els.fileInput.addEventListener('change', (e) => { handleFile(e.target.files[0]); e.target.value = ''; });
+els.uploadBox.addEventListener('click', () => els.fileInput.click());
+els.uploadBox.addEventListener('dragover', (e) => { e.preventDefault(); els.uploadBox.classList.add('drag'); });
+els.uploadBox.addEventListener('dragleave', () => els.uploadBox.classList.remove('drag'));
+els.uploadBox.addEventListener('drop', (e) => { e.preventDefault(); els.uploadBox.classList.remove('drag'); handleFile(e.dataTransfer.files[0]); });
+
+// Also allow drop on the entire canvas area
+document.body.addEventListener('dragover', (e) => e.preventDefault());
+document.body.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+
+// Toolbar buttons
+$('#btn-open').addEventListener('click', () => els.fileInput.click());
+$('#btn-download').addEventListener('click', downloadPdf);
+$('#btn-prev').addEventListener('click', () => changePage(S.currentPage - 1));
+$('#btn-next').addEventListener('click', () => changePage(S.currentPage + 1));
+els.pageInput.addEventListener('change', () => changePage(parseInt(els.pageInput.value)));
+$('#btn-zout').addEventListener('click', () => { S.zoom = Math.max(0.25, S.zoom - 0.25); renderPage(); });
+$('#btn-zin').addEventListener('click', () => { S.zoom = Math.min(5, S.zoom + 0.25); renderPage(); });
+$('#btn-fit').addEventListener('click', () => {
+  if (!S.pdfDoc) return;
+  S.pdfDoc.getPage(S.currentPage).then(page => {
+    const vp = page.getViewport({ scale: 1 });
+    const areaW = els.canvasArea.clientWidth - 32;
+    S.zoom = areaW / vp.width;
+    renderPage();
+  });
+});
+
+// Sidebar toggle
+$('#btn-sidebar').addEventListener('click', () => {
+  S.sidebarOpen = !S.sidebarOpen;
+  els.sidebar.style.display = S.sidebarOpen ? 'flex' : 'none';
+  $('#btn-sidebar').classList.toggle('active', S.sidebarOpen);
+});
+
+// Tool buttons
+$$('[data-tool]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    S.activeTool = btn.dataset.tool;
+    applyTool();
+  });
+});
+
+// Color buttons
+$$('.color-dot').forEach(btn => {
+  btn.addEventListener('click', () => {
+    S.color = btn.dataset.color;
+    $$('.color-dot').forEach(b => b.classList.toggle('active', b === btn));
+    applyTool();
+  });
+});
+
+// Stroke width
+$('#stroke-sel').addEventListener('change', (e) => {
+  S.strokeWidth = parseInt(e.target.value);
+  applyTool();
+});
+
+// Undo / Redo
+$('#btn-undo').addEventListener('click', undo);
+$('#btn-redo').addEventListener('click', redo);
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'Z' || e.key === 'y')) { e.preventDefault(); redo(); }
+  if (e.key === 'ArrowLeft' && !e.target.closest('input')) changePage(S.currentPage - 1);
+  if (e.key === 'ArrowRight' && !e.target.closest('input')) changePage(S.currentPage + 1);
+});
+
+updateStatus();
+</script>
+</body>
+</html>
