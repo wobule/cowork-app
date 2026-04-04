@@ -2,7 +2,7 @@ name: Deploy PDF Editor to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, claude/pdf-editor-viewer-pfnAo]
     paths:
       - 'pdf-editor-browser.html'
       - '.github/workflows/deploy-pdf-editor.yml'
