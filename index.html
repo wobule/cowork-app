@@ -682,22 +682,19 @@ function applyTool() {
         // Remove the outline rect
         fc.remove(target);
 
-        // Sample the actual background color from the PDF canvas
+        // Erase original text directly on PDF canvas (preserves true background)
         const dpr = window.devicePixelRatio || 1;
         const bgColor = sampleBackgroundColor(els.pdfCanvas, item.x, item.y, item.width, item.height, dpr);
+        const pdfCtx = els.pdfCanvas.getContext('2d');
+        pdfCtx.fillStyle = bgColor;
+        pdfCtx.fillRect(
+          Math.round((item.x - 2) * dpr),
+          Math.round((item.y - 1) * dpr),
+          Math.round((item.width + 6) * dpr),
+          Math.round((item.height + 2) * dpr)
+        );
 
-        // Background rect matching original color to cover original text
-        const bg = new fabric.Rect({
-          left: item.x - 2, top: item.y - 1,
-          width: item.width + 6, height: item.height + 2,
-          fill: bgColor, selectable: false, evented: false,
-          _isTextEditBg: true,
-          _pdfX: item.pdfX, _pdfY: item.pdfY,
-          _bgColor: bgColor,
-        });
-        fc.add(bg);
-
-        // Editable IText
+        // Editable IText (no background rect needed — original text erased on PDF canvas)
         const itext = new fabric.IText(item.str, {
           left: item.x, top: item.y,
           fontSize: item.fontSize,
@@ -710,7 +707,6 @@ function applyTool() {
           _pdfFontSize: item.pdfFontSize,
           _pdfWidth: item.pdfWidth,
           _fontName: item.fontName,
-          _bgColor: bgColor,
         });
         fc.add(itext);
         fc.setActiveObject(itext);
