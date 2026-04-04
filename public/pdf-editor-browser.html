@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PDF 編輯器</title>
+<title>PDF 編輯器</title><!-- deploy v2 -->
 <script src="https://unpkg.com/fabric@6.6.1/dist/index.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <style>
@@ -866,7 +866,8 @@ async function downloadPdf() {
     saveAnnotations(S.currentPage);
     const { PDFDocument, rgb } = PDFLib;
     const pdfLibDoc = await PDFDocument.load(S.pdfBytes);
-    let embeddedFallbackFont = null; // lazy embed once across all pages
+    let embeddedFallbackFont = null; // lazy embed once across all pages (CJK)
+    let embeddedStandardFont = null; // lazy embed once (Latin - Helvetica)
 
     for (const [pageNum, json] of S.annotations) {
       let parsed;
@@ -878,7 +879,7 @@ async function downloadPdf() {
 
       // Separate text edits from regular annotations
       const textEditObjs = parsed.objects.filter(o => o._isTextEdit && o.text !== o._origStr);
-      const otherObjs = parsed.objects.filter(o => !o._isTextEdit && !o._isTextEditBg);
+      const otherObjs = parsed.objects.filter(o => !o._isTextEdit && !o._isTextEditBg && !o._isTextBlock);
 
       // ===== Process text edits with 3-tier strategy =====
       if (textEditObjs.length > 0) {
@@ -952,13 +953,25 @@ async function downloadPdf() {
           // --- Tier 2: Font substitution with embedded fallback font ---
           if (!handled) {
             try {
-              if (!embeddedFallbackFont) {
-                const fontBytes = await loadFallbackFont();
-                if (fontBytes) {
-                  embeddedFallbackFont = await pdfLibDoc.embedFont(fontBytes, { subset: true });
+              // Detect if text contains CJK characters
+              const hasCJK = /[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F]/.test(newText);
+              let tier2Font = null;
+              if (hasCJK) {
+                if (!embeddedFallbackFont) {
+                  const fontBytes = await loadFallbackFont();
+                  if (fontBytes) {
+                    embeddedFallbackFont = await pdfLibDoc.embedFont(fontBytes, { subset: true });
+                  }
                 }
+                tier2Font = embeddedFallbackFont;
+              } else {
+                // Latin text: use built-in standard font (no download needed)
+                if (!embeddedStandardFont) {
+                  embeddedStandardFont = await pdfLibDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+                }
+                tier2Font = embeddedStandardFont;
               }
-              if (embeddedFallbackFont) {
+              if (tier2Font) {
                 // White rect over original text
                 page.drawRectangle({
                   x: edit._pdfX - 1,
@@ -968,12 +981,12 @@ async function downloadPdf() {
                   color: rgb(1, 1, 1),
                   borderWidth: 0,
                 });
-                // Draw new text with fallback font
+                // Draw new text with substitution font
                 page.drawText(newText, {
                   x: edit._pdfX,
                   y: edit._pdfY,
                   size: edit._pdfFontSize,
-                  font: embeddedFallbackFont,
+                  font: tier2Font,
                   color: rgb(0, 0, 0),
                 });
                 handled = true;
