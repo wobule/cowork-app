@@ -315,7 +315,18 @@ const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHigh
 
 // Serialize canvas, filtering out transient objects (text block outlines, hover highlights)
 function serializeCanvas() {
+  const liveObjs = S.fc.getObjects();
   const data = S.fc.toJSON(CUSTOM_PROPS);
+  // fabric.js v6 may not serialize custom underscore-prefixed properties;
+  // manually inject them from the live canvas objects to ensure they survive round-trip
+  if (data.objects.length === liveObjs.length) {
+    data.objects.forEach((serialized, i) => {
+      const live = liveObjs[i];
+      for (const prop of CUSTOM_PROPS) {
+        if (live[prop] !== undefined) serialized[prop] = live[prop];
+      }
+    });
+  }
   data.objects = data.objects.filter(o => !o._isHoverHighlight && !o._isTextBlock);
   return JSON.stringify(data);
 }
@@ -863,6 +874,10 @@ async function loadFallbackFont() {
 async function downloadPdf() {
   if (!S.pdfBytes || !S.fc) return;
   try {
+    // Remove transient text block outlines before saving (they're only for editing UI)
+    const textBlockObjs = S.fc.getObjects().filter(o => o._isTextBlock);
+    textBlockObjs.forEach(o => S.fc.remove(o));
+
     saveAnnotations(S.currentPage);
     const { PDFDocument, rgb } = PDFLib;
     const pdfLibDoc = await PDFDocument.load(S.pdfBytes);
@@ -880,6 +895,7 @@ async function downloadPdf() {
       // Separate text edits from regular annotations
       const textEditObjs = parsed.objects.filter(o => o._isTextEdit && o.text !== o._origStr);
       const otherObjs = parsed.objects.filter(o => !o._isTextEdit && !o._isTextEditBg && !o._isTextBlock);
+      console.log(`Page ${pageNum}: total=${parsed.objects.length}, textEdits=${textEditObjs.length}, other=${otherObjs.length}`);
 
       // ===== Process text edits with 3-tier strategy =====
       if (textEditObjs.length > 0) {
