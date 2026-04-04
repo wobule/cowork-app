@@ -32,7 +32,8 @@ input, select { font: inherit; }
 /* Toolbar */
 #toolbar {
   display: flex; align-items: center; gap: 4px; padding: 6px 8px;
-  border-bottom: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0;
+  overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
 }
 .tb { padding: 6px 7px; border-radius: 6px; color: var(--text-secondary); transition: all .15s; display: flex; align-items: center; justify-content: center; }
 .tb:hover { background: var(--bg-hover); color: var(--text-primary); }
@@ -112,6 +113,13 @@ input, select { font: inherit; }
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 3px; }
+
+/* Mobile: larger touch targets, ensure toolbar scrolls horizontally */
+@media (max-width: 640px) {
+  .tb { padding: 8px 9px; min-width: 36px; min-height: 36px; }
+  .tb svg { width: 18px; height: 18px; }
+  #toolbar { gap: 2px; padding: 4px 6px; }
+}
 </style>
 </head>
 <body>
@@ -311,7 +319,7 @@ function updateUndoRedo() {
   $('#btn-redo').disabled = S.historyIdx >= S.history.length - 1;
 }
 
-const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName','_bgColor'];
+const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName','_textColor'];
 
 // Serialize canvas, filtering out transient objects (text block outlines, hover highlights)
 function serializeCanvas() {
@@ -516,12 +524,55 @@ function sampleBackgroundColor(pdfCanvas, x, y, w, h, dpr) {
   }
 }
 
+// Sample text color from the center of a text region on the PDF canvas
+function sampleTextColor(pdfCanvas, x, y, w, h, dpr) {
+  try {
+    const ctx = pdfCanvas.getContext('2d', { willReadFrequently: true });
+    // Sample several points near center of text area (where text pixels are most likely)
+    const points = [
+      [x + w * 0.3, y + h * 0.5],
+      [x + w * 0.5, y + h * 0.5],
+      [x + w * 0.7, y + h * 0.5],
+      [x + w * 0.4, y + h * 0.4],
+      [x + w * 0.6, y + h * 0.6],
+    ];
+    // Also sample background to distinguish text pixels from bg
+    const bgD = ctx.getImageData(Math.round((x + 1) * dpr), Math.round((y + 1) * dpr), 1, 1).data;
+    const bgKey = `${bgD[0] & ~15},${bgD[1] & ~15},${bgD[2] & ~15}`;
+    let darkest = null;
+    let darkestL = 999;
+    for (const [px, py] of points) {
+      const d = ctx.getImageData(Math.round(px * dpr), Math.round(py * dpr), 1, 1).data;
+      const key = `${d[0] & ~15},${d[1] & ~15},${d[2] & ~15}`;
+      // Skip pixels that match background
+      if (key === bgKey) continue;
+      // Pick the darkest non-background pixel (most likely the text)
+      const luminance = d[0] * 0.299 + d[1] * 0.587 + d[2] * 0.114;
+      if (luminance < darkestL) {
+        darkestL = luminance;
+        darkest = d;
+      }
+    }
+    if (darkest) return `rgb(${darkest[0]},${darkest[1]},${darkest[2]})`;
+    return 'rgb(0,0,0)';
+  } catch (e) {
+    return 'rgb(0,0,0)';
+  }
+}
+
 // Parse CSS color string to [r, g, b] values (0-255)
-function parseBgColorRgb(color) {
-  if (!color || color === 'white') return [255, 255, 255];
+function parseColorRgb(color) {
+  if (!color) return [0, 0, 0];
+  if (color === 'white') return [255, 255, 255];
   const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
   if (m) return [+m[1], +m[2], +m[3]];
-  return [255, 255, 255];
+  // Try hex (#RRGGBB or #RGB)
+  const hm = color.match(/^#([0-9a-f]{6})$/i);
+  if (hm) {
+    const h = hm[1];
+    return [parseInt(h.substring(0,2),16), parseInt(h.substring(2,4),16), parseInt(h.substring(4,6),16)];
+  }
+  return [0, 0, 0];
 }
 
 // ===== Tool Switching =====
@@ -682,8 +733,10 @@ function applyTool() {
         // Remove the outline rect
         fc.remove(target);
 
-        // Erase original text directly on PDF canvas (preserves true background)
+        // Sample text color before erasing
         const dpr = window.devicePixelRatio || 1;
+        const textColor = sampleTextColor(els.pdfCanvas, item.x, item.y, item.width, item.height, dpr);
+        // Erase original text directly on PDF canvas (preserves true background)
         const bgColor = sampleBackgroundColor(els.pdfCanvas, item.x, item.y, item.width, item.height, dpr);
         const pdfCtx = els.pdfCanvas.getContext('2d');
         pdfCtx.fillStyle = bgColor;
@@ -694,11 +747,11 @@ function applyTool() {
           Math.round((item.height + 2) * dpr)
         );
 
-        // Editable IText (no background rect needed — original text erased on PDF canvas)
+        // Editable IText with original text color (no background rect — original text erased on PDF canvas)
         const itext = new fabric.IText(item.str, {
           left: item.x, top: item.y,
           fontSize: item.fontSize,
-          fill: '#000000',
+          fill: textColor,
           fontFamily: 'sans-serif',
           _isTextEdit: true,
           _origStr: item.str,
@@ -707,6 +760,7 @@ function applyTool() {
           _pdfFontSize: item.pdfFontSize,
           _pdfWidth: item.pdfWidth,
           _fontName: item.fontName,
+          _textColor: textColor,
         });
         fc.add(itext);
         fc.setActiveObject(itext);
@@ -968,6 +1022,49 @@ function hideOriginalTextInContentStream(csInfo, edit, pdfLibDoc, page, pageNum)
         return true;
       }
     }
+
+    // Try TJ array form: [<hex> kern <hex> ...] TJ or [(text) kern (text) ...] TJ
+    const tjArrayRegex = /\[([^\]]*)\]\s*TJ/gi;
+    let tjArrMatch;
+    while ((tjArrMatch = tjArrayRegex.exec(csInfo.text)) !== null) {
+      const arrayContent = tjArrMatch[1];
+      // Check hex strings within TJ array
+      if (maps && maps.reverse.size > 0) {
+        const sampleGid2 = maps.forward.keys().next().value;
+        const padLen2 = sampleGid2 ? sampleGid2.length : 4;
+        const origEnc2 = encodeTextAsGlyphIds(edit._origStr, maps.reverse, padLen2);
+        if (origEnc2.allFound) {
+          const origHex2 = origEnc2.hex.toUpperCase();
+          const hexParts = [];
+          for (const hm of arrayContent.matchAll(/<([0-9A-Fa-f]+)>/g)) {
+            hexParts.push(hm[1].toUpperCase());
+          }
+          if (hexParts.length > 0 && hexParts.join('').includes(origHex2)) {
+            const tjStart = tjArrMatch.index;
+            const tjEnd = tjStart + tjArrMatch[0].length;
+            csInfo.text = csInfo.text.substring(0, tjStart) + '3 Tr ' +
+              csInfo.text.substring(tjStart, tjEnd) + ' 0 Tr' +
+              csInfo.text.substring(tjEnd);
+            console.log(`hideText OK: "${edit._origStr}" hidden via Tr 3 (TJ array hex)`);
+            return true;
+          }
+        }
+      }
+      // Check literal strings within TJ array
+      const litParts = [];
+      for (const lm of arrayContent.matchAll(/\(([^)]*)\)/g)) {
+        litParts.push(lm[1]);
+      }
+      if (litParts.length > 0 && litParts.join('').includes(edit._origStr)) {
+        const tjStart = tjArrMatch.index;
+        const tjEnd = tjStart + tjArrMatch[0].length;
+        csInfo.text = csInfo.text.substring(0, tjStart) + '3 Tr ' +
+          csInfo.text.substring(tjStart, tjEnd) + ' 0 Tr' +
+          csInfo.text.substring(tjEnd);
+        console.log(`hideText OK: "${edit._origStr}" hidden via Tr 3 (TJ array literal)`);
+        return true;
+      }
+    }
   } catch (e) {
     console.warn('hideOriginalTextInContentStream failed:', e);
   }
@@ -1098,25 +1195,14 @@ async function downloadPdf() {
                   csTextHidden = hideOriginalTextInContentStream(csInfo, edit, pdfLibDoc, page, pageNum);
                   if (csTextHidden) csModified = true;
                 }
-                // Fallback: cover with background-colored rect if Tr 3 failed
-                if (!csTextHidden) {
-                  const [br, bg2, bb] = parseBgColorRgb(edit._bgColor);
-                  page.drawRectangle({
-                    x: edit._pdfX - 1,
-                    y: edit._pdfY - edit._pdfFontSize * 0.3,
-                    width: edit._pdfWidth + 4,
-                    height: edit._pdfFontSize * 1.4,
-                    color: rgb(br / 255, bg2 / 255, bb / 255),
-                    borderWidth: 0,
-                  });
-                }
-                // Draw new text with substitution font
+                // Draw new text with substitution font (transparent background — independent layer)
+                const [tr, tg, tb] = parseColorRgb(edit._textColor);
                 page.drawText(newText, {
                   x: edit._pdfX,
                   y: edit._pdfY,
                   size: edit._pdfFontSize,
                   font: tier2Font,
-                  color: rgb(0, 0, 0),
+                  color: rgb(tr / 255, tg / 255, tb / 255),
                 });
                 handled = true;
                 console.log(`Tier 2 OK: "${edit._origStr}" → "${newText}" (font substitution, bgHidden=${csTextHidden})`);
@@ -1143,15 +1229,11 @@ async function downloadPdf() {
               tmpCanvas.height = Math.ceil(h * dpr);
               const ctx = tmpCanvas.getContext('2d');
               ctx.scale(dpr, dpr);
-              // Transparent if original text hidden, otherwise use sampled bg color
-              if (csTextHidden) {
-                ctx.clearRect(0, 0, w, h);
-              } else {
-                ctx.fillStyle = edit._bgColor || 'white';
-                ctx.fillRect(0, 0, w, h);
-              }
-              // Draw text
-              ctx.fillStyle = 'black';
+              // Always transparent background — text edit is an independent layer
+              ctx.clearRect(0, 0, w, h);
+              // Draw text with original color
+              const [tr3, tg3, tb3] = parseColorRgb(edit._textColor);
+              ctx.fillStyle = `rgb(${tr3},${tg3},${tb3})`;
               ctx.font = `${edit._pdfFontSize}px sans-serif`;
               ctx.textBaseline = 'alphabetic';
               ctx.fillText(newText, 1, edit._pdfFontSize);
