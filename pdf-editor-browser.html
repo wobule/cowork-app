@@ -311,7 +311,7 @@ function updateUndoRedo() {
   $('#btn-redo').disabled = S.historyIdx >= S.history.length - 1;
 }
 
-const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName'];
+const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName','_bgColor'];
 
 // Serialize canvas, filtering out transient objects (text block outlines, hover highlights)
 function serializeCanvas() {
@@ -491,6 +491,39 @@ async function renderThumbnails() {
   }
 }
 
+// Sample background color from PDF canvas at a text item's position
+function sampleBackgroundColor(pdfCanvas, x, y, w, h, dpr) {
+  try {
+    const ctx = pdfCanvas.getContext('2d', { willReadFrequently: true });
+    // Sample 6 edge points (avoid text pixels in the center)
+    const points = [
+      [x + 1, y + 1], [x + w - 1, y + 1],       // top corners
+      [x + 1, y + h - 1], [x + w - 1, y + h - 1], // bottom corners
+      [x + w / 2, y + 1], [x + w / 2, y + h - 1], // top/bottom mid
+    ];
+    const buckets = {};
+    for (const [px, py] of points) {
+      const d = ctx.getImageData(Math.round(px * dpr), Math.round(py * dpr), 1, 1).data;
+      // Round to nearest 8 to group anti-aliased variants
+      const key = `${d[0] & ~7},${d[1] & ~7},${d[2] & ~7}`;
+      buckets[key] = (buckets[key] || 0) + 1;
+    }
+    const best = Object.entries(buckets).sort((a, b) => b[1] - a[1])[0][0];
+    const [r, g, b] = best.split(',').map(Number);
+    return `rgb(${r},${g},${b})`;
+  } catch (e) {
+    return 'white';
+  }
+}
+
+// Parse CSS color string to [r, g, b] values (0-255)
+function parseBgColorRgb(color) {
+  if (!color || color === 'white') return [255, 255, 255];
+  const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+  if (m) return [+m[1], +m[2], +m[3]];
+  return [255, 255, 255];
+}
+
 // ===== Tool Switching =====
 function applyTool() {
   const fc = S.fc;
@@ -649,13 +682,18 @@ function applyTool() {
         // Remove the outline rect
         fc.remove(target);
 
-        // White rect to cover original text
+        // Sample the actual background color from the PDF canvas
+        const dpr = window.devicePixelRatio || 1;
+        const bgColor = sampleBackgroundColor(els.pdfCanvas, item.x, item.y, item.width, item.height, dpr);
+
+        // Background rect matching original color to cover original text
         const bg = new fabric.Rect({
           left: item.x - 2, top: item.y - 1,
           width: item.width + 6, height: item.height + 2,
-          fill: 'white', selectable: false, evented: false,
+          fill: bgColor, selectable: false, evented: false,
           _isTextEditBg: true,
           _pdfX: item.pdfX, _pdfY: item.pdfY,
+          _bgColor: bgColor,
         });
         fc.add(bg);
 
@@ -672,6 +710,7 @@ function applyTool() {
           _pdfFontSize: item.pdfFontSize,
           _pdfWidth: item.pdfWidth,
           _fontName: item.fontName,
+          _bgColor: bgColor,
         });
         fc.add(itext);
         fc.setActiveObject(itext);
@@ -870,6 +909,75 @@ async function loadFallbackFont() {
   }
 }
 
+// Hide original text in content stream using PDF rendering mode 3 (invisible)
+// instead of covering it with a white rectangle. This preserves background colors.
+function hideOriginalTextInContentStream(csInfo, edit, pdfLibDoc, page, pageNum) {
+  if (!csInfo || !csInfo.text) return false;
+  try {
+    // Try hex-encoded glyph ID form first
+    const cacheKey = `${pageNum - 1}:${edit._fontName}`;
+    let maps = S.toUnicodeMaps.get(cacheKey);
+    if (!maps) {
+      const cmapStr = getFontToUnicodeCMap(pdfLibDoc, page, edit._fontName);
+      if (cmapStr) {
+        const forward = parseToUnicodeCMap(cmapStr);
+        const reverse = buildReverseMap(forward);
+        maps = { forward, reverse };
+        S.toUnicodeMaps.set(cacheKey, maps);
+      }
+    }
+
+    // Try hex string search: <HEXHEXHEX> Tj
+    if (maps && maps.reverse.size > 0) {
+      const sampleGid = maps.forward.keys().next().value;
+      const padLen = sampleGid ? sampleGid.length : 4;
+      const origEnc = encodeTextAsGlyphIds(edit._origStr, maps.reverse, padLen);
+      if (origEnc.allFound) {
+        const origHex = origEnc.hex.toUpperCase();
+        const csUpper = csInfo.text.toUpperCase();
+        const hexStr = '<' + origHex + '>';
+        const idx = csUpper.indexOf(hexStr.toUpperCase());
+        if (idx !== -1) {
+          // Find the Tj/TJ operator after this hex string
+          const afterHex = idx + hexStr.length;
+          const rest = csInfo.text.substring(afterHex);
+          const tjMatch = rest.match(/^\s*(Tj|TJ)/);
+          if (tjMatch) {
+            const tjEnd = afterHex + tjMatch.index + tjMatch[0].length;
+            // Insert 3 Tr before hex string and 0 Tr after Tj
+            csInfo.text = csInfo.text.substring(0, idx) + '3 Tr ' +
+              csInfo.text.substring(idx, tjEnd) + ' 0 Tr' +
+              csInfo.text.substring(tjEnd);
+            console.log(`hideText OK: "${edit._origStr}" hidden via Tr 3 (hex)`);
+            return true;
+          }
+        }
+      }
+    }
+
+    // Try literal string form: (text) Tj
+    const escaped = edit._origStr.replace(/[\(\)\\]/g, '\\$&');
+    const litPattern = '(' + escaped + ')';
+    const litIdx = csInfo.text.indexOf(litPattern);
+    if (litIdx !== -1) {
+      const afterLit = litIdx + litPattern.length;
+      const rest = csInfo.text.substring(afterLit);
+      const tjMatch = rest.match(/^\s*(Tj|TJ)/);
+      if (tjMatch) {
+        const tjEnd = afterLit + tjMatch.index + tjMatch[0].length;
+        csInfo.text = csInfo.text.substring(0, litIdx) + '3 Tr ' +
+          csInfo.text.substring(litIdx, tjEnd) + ' 0 Tr' +
+          csInfo.text.substring(tjEnd);
+        console.log(`hideText OK: "${edit._origStr}" hidden via Tr 3 (literal)`);
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('hideOriginalTextInContentStream failed:', e);
+  }
+  return false;
+}
+
 // ===== Download with Annotations =====
 async function downloadPdf() {
   if (!S.pdfBytes || !S.fc) return;
@@ -988,15 +1096,24 @@ async function downloadPdf() {
                 tier2Font = embeddedStandardFont;
               }
               if (tier2Font) {
-                // White rect over original text
-                page.drawRectangle({
-                  x: edit._pdfX - 1,
-                  y: edit._pdfY - edit._pdfFontSize * 0.3,
-                  width: edit._pdfWidth + 4,
-                  height: edit._pdfFontSize * 1.4,
-                  color: rgb(1, 1, 1),
-                  borderWidth: 0,
-                });
+                // Hide original text in content stream via Tr 3 (preserves background)
+                let csTextHidden = false;
+                if (csInfo) {
+                  csTextHidden = hideOriginalTextInContentStream(csInfo, edit, pdfLibDoc, page, pageNum);
+                  if (csTextHidden) csModified = true;
+                }
+                // Fallback: cover with background-colored rect if Tr 3 failed
+                if (!csTextHidden) {
+                  const [br, bg2, bb] = parseBgColorRgb(edit._bgColor);
+                  page.drawRectangle({
+                    x: edit._pdfX - 1,
+                    y: edit._pdfY - edit._pdfFontSize * 0.3,
+                    width: edit._pdfWidth + 4,
+                    height: edit._pdfFontSize * 1.4,
+                    color: rgb(br / 255, bg2 / 255, bb / 255),
+                    borderWidth: 0,
+                  });
+                }
                 // Draw new text with substitution font
                 page.drawText(newText, {
                   x: edit._pdfX,
@@ -1006,7 +1123,7 @@ async function downloadPdf() {
                   color: rgb(0, 0, 0),
                 });
                 handled = true;
-                console.log(`Tier 2 OK: "${edit._origStr}" → "${newText}" (fallback font substitution)`);
+                console.log(`Tier 2 OK: "${edit._origStr}" → "${newText}" (font substitution, bgHidden=${csTextHidden})`);
               }
             } catch (e) {
               console.warn('Tier 2 font substitution failed:', e);
@@ -1016,6 +1133,12 @@ async function downloadPdf() {
           // --- Tier 3: PNG micro-overlay (last resort) ---
           if (!handled) {
             try {
+              // Try to hide original text via Tr 3 first
+              let csTextHidden = false;
+              if (csInfo) {
+                csTextHidden = hideOriginalTextInContentStream(csInfo, edit, pdfLibDoc, page, pageNum);
+                if (csTextHidden) csModified = true;
+              }
               const dpr = 4; // high DPI for quality
               const w = Math.max(edit._pdfWidth + 4, 50);
               const h = edit._pdfFontSize * 1.5;
@@ -1024,9 +1147,13 @@ async function downloadPdf() {
               tmpCanvas.height = Math.ceil(h * dpr);
               const ctx = tmpCanvas.getContext('2d');
               ctx.scale(dpr, dpr);
-              // White background
-              ctx.fillStyle = 'white';
-              ctx.fillRect(0, 0, w, h);
+              // Transparent if original text hidden, otherwise use sampled bg color
+              if (csTextHidden) {
+                ctx.clearRect(0, 0, w, h);
+              } else {
+                ctx.fillStyle = edit._bgColor || 'white';
+                ctx.fillRect(0, 0, w, h);
+              }
               // Draw text
               ctx.fillStyle = 'black';
               ctx.font = `${edit._pdfFontSize}px sans-serif`;
