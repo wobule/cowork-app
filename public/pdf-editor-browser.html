@@ -315,7 +315,18 @@ const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHigh
 
 // Serialize canvas, filtering out transient objects (text block outlines, hover highlights)
 function serializeCanvas() {
+  const liveObjs = S.fc.getObjects();
   const data = S.fc.toJSON(CUSTOM_PROPS);
+  // fabric.js v6 may not serialize custom underscore-prefixed properties;
+  // manually inject them from the live canvas objects to ensure they survive round-trip
+  if (data.objects.length === liveObjs.length) {
+    data.objects.forEach((serialized, i) => {
+      const live = liveObjs[i];
+      for (const prop of CUSTOM_PROPS) {
+        if (live[prop] !== undefined) serialized[prop] = live[prop];
+      }
+    });
+  }
   data.objects = data.objects.filter(o => !o._isHoverHighlight && !o._isTextBlock);
   return JSON.stringify(data);
 }
@@ -863,10 +874,15 @@ async function loadFallbackFont() {
 async function downloadPdf() {
   if (!S.pdfBytes || !S.fc) return;
   try {
+    // Remove transient text block outlines before saving (they're only for editing UI)
+    const textBlockObjs = S.fc.getObjects().filter(o => o._isTextBlock);
+    textBlockObjs.forEach(o => S.fc.remove(o));
+
     saveAnnotations(S.currentPage);
     const { PDFDocument, rgb } = PDFLib;
     const pdfLibDoc = await PDFDocument.load(S.pdfBytes);
-    let embeddedFallbackFont = null; // lazy embed once across all pages
+    let embeddedFallbackFont = null; // lazy embed once across all pages (CJK)
+    let embeddedStandardFont = null; // lazy embed once (Latin - Helvetica)
 
     for (const [pageNum, json] of S.annotations) {
       let parsed;
@@ -878,7 +894,8 @@ async function downloadPdf() {
 
       // Separate text edits from regular annotations
       const textEditObjs = parsed.objects.filter(o => o._isTextEdit && o.text !== o._origStr);
-      const otherObjs = parsed.objects.filter(o => !o._isTextEdit && !o._isTextEditBg);
+      const otherObjs = parsed.objects.filter(o => !o._isTextEdit && !o._isTextEditBg && !o._isTextBlock);
+      console.log(`Page ${pageNum}: total=${parsed.objects.length}, textEdits=${textEditObjs.length}, other=${otherObjs.length}`);
 
       // ===== Process text edits with 3-tier strategy =====
       if (textEditObjs.length > 0) {
@@ -952,13 +969,25 @@ async function downloadPdf() {
           // --- Tier 2: Font substitution with embedded fallback font ---
           if (!handled) {
             try {
-              if (!embeddedFallbackFont) {
-                const fontBytes = await loadFallbackFont();
-                if (fontBytes) {
-                  embeddedFallbackFont = await pdfLibDoc.embedFont(fontBytes, { subset: true });
+              // Detect if text contains CJK characters
+              const hasCJK = /[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F]/.test(newText);
+              let tier2Font = null;
+              if (hasCJK) {
+                if (!embeddedFallbackFont) {
+                  const fontBytes = await loadFallbackFont();
+                  if (fontBytes) {
+                    embeddedFallbackFont = await pdfLibDoc.embedFont(fontBytes, { subset: true });
+                  }
                 }
+                tier2Font = embeddedFallbackFont;
+              } else {
+                // Latin text: use built-in standard font (no download needed)
+                if (!embeddedStandardFont) {
+                  embeddedStandardFont = await pdfLibDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+                }
+                tier2Font = embeddedStandardFont;
               }
-              if (embeddedFallbackFont) {
+              if (tier2Font) {
                 // White rect over original text
                 page.drawRectangle({
                   x: edit._pdfX - 1,
@@ -968,12 +997,12 @@ async function downloadPdf() {
                   color: rgb(1, 1, 1),
                   borderWidth: 0,
                 });
-                // Draw new text with fallback font
+                // Draw new text with substitution font
                 page.drawText(newText, {
                   x: edit._pdfX,
                   y: edit._pdfY,
                   size: edit._pdfFontSize,
-                  font: embeddedFallbackFont,
+                  font: tier2Font,
                   color: rgb(0, 0, 0),
                 });
                 handled = true;
