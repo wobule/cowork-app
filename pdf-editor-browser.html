@@ -311,12 +311,12 @@ function updateUndoRedo() {
   $('#btn-redo').disabled = S.historyIdx >= S.history.length - 1;
 }
 
-const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName'];
+const CUSTOM_PROPS = ['_isTextEdit','_isTextEditBg','_isTextBlock','_isHoverHighlight','_origStr','_pdfX','_pdfY','_pdfFontSize','_pdfWidth','_fontName'];
 
-// Serialize canvas, filtering out transient objects (hover highlights)
+// Serialize canvas, filtering out transient objects (text block outlines, hover highlights)
 function serializeCanvas() {
   const data = S.fc.toJSON(CUSTOM_PROPS);
-  data.objects = data.objects.filter(o => !o._isHoverHighlight);
+  data.objects = data.objects.filter(o => !o._isHoverHighlight && !o._isTextBlock);
   return JSON.stringify(data);
 }
 
@@ -488,6 +488,8 @@ function applyTool() {
   fc.selection = true;
   fc.defaultCursor = 'default';
   fc.hoverCursor = 'move';
+  // Remove text block outlines and hover highlights when switching tools
+  fc.getObjects().filter(o => o._isTextBlock || o._isHoverHighlight).forEach(o => fc.remove(o));
   fc.forEachObject(o => { o.selectable = true; o.evented = true; });
   fc.off('mouse:down');
   fc.off('mouse:move');
@@ -576,115 +578,95 @@ function applyTool() {
   } else if (t === 'editText') {
     fc.isDrawingMode = false;
     fc.selection = false;
-    fc.defaultCursor = 'text';
-    fc.hoverCursor = 'text';
-    // Allow existing text edit objects to be selected
+    fc.defaultCursor = 'default';
+    fc.hoverCursor = 'pointer';
+
+    // --- Acrobat-style: show ALL text blocks as clickable blue-bordered regions ---
+    // Remove any previous text block outlines
+    fc.getObjects().filter(o => o._isTextBlock).forEach(o => fc.remove(o));
+
+    // Allow existing text edits to remain selectable
     fc.forEachObject(o => {
-      o.selectable = !!o._isTextEdit;
-      o.evented = !!o._isTextEdit;
+      if (o._isTextEdit) { o.selectable = true; o.evented = true; }
     });
 
-    // Helper to get pointer position (compatible with fabric v6)
-    function getPointer(evt) {
-      if (fc.getScenePoint) return fc.getScenePoint(evt);
-      if (fc.getPointer) return fc.getPointer(evt, true);
-      // Manual fallback
-      const rect = fc.getElement().getBoundingClientRect();
-      const e = evt.touches ? evt.touches[0] : evt;
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    }
+    console.log(`[editText] Creating ${S.pageTextItems.length} text block outlines`);
 
-    // Hit test with padding tolerance
-    function hitTestText(px, py) {
-      const pad = 4; // extra pixels of tolerance
-      return S.pageTextItems.find(it =>
-        px >= it.x - pad && px <= it.x + it.width + pad &&
-        py >= it.y - pad && py <= it.y + it.height + pad
+    // Create a clickable outline rect for every extracted text item
+    for (const item of S.pageTextItems) {
+      // Skip if already has an edit overlay at this position
+      const alreadyEdited = fc.getObjects().find(o =>
+        o._isTextEdit && Math.abs(o._pdfX - item.pdfX) < 1 && Math.abs(o._pdfY - item.pdfY) < 1
       );
+      if (alreadyEdited) continue;
+
+      const blockRect = new fabric.Rect({
+        left: item.x - 1,
+        top: item.y - 1,
+        width: item.width + 2,
+        height: item.height + 2,
+        fill: 'rgba(66,133,244,0.08)',
+        stroke: 'rgba(66,133,244,0.5)',
+        strokeWidth: 1,
+        selectable: false,
+        evented: true,
+        hoverCursor: 'text',
+        // Store text item data on the rect
+        _isTextBlock: true,
+        _textItem: item,
+      });
+      fc.add(blockRect);
     }
+    fc.renderAll();
 
-    // Hover highlight
-    let hoverRect = null;
-    fc.on('mouse:move', (opt) => {
-      const p = getPointer(opt.e);
-      const item = hitTestText(p.x, p.y);
-      if (item && !hoverRect) {
-        hoverRect = new fabric.Rect({
-          left: item.x - 2, top: item.y - 1,
-          width: item.width + 4, height: item.height + 2,
-          fill: 'rgba(66,133,244,0.15)', stroke: 'rgba(66,133,244,0.4)',
-          strokeWidth: 1, selectable: false, evented: false,
-          _isHoverHighlight: true,
-        });
-        fc.add(hoverRect);
-        fc.renderAll();
-      } else if (!item && hoverRect) {
-        fc.remove(hoverRect);
-        hoverRect = null;
-        fc.renderAll();
-      } else if (item && hoverRect) {
-        hoverRect.set({ left: item.x - 2, top: item.y - 1, width: item.width + 4, height: item.height + 2 });
-        fc.renderAll();
-      }
-    });
-
+    // When a text block is clicked, replace it with an editable IText
     fc.on('mouse:down', (opt) => {
-      // Remove hover highlight
-      if (hoverRect) { fc.remove(hoverRect); hoverRect = null; }
+      const target = opt.target;
 
-      // If clicked an existing text edit, enter editing
-      if (opt.target && opt.target._isTextEdit) {
-        fc.setActiveObject(opt.target);
-        opt.target.enterEditing();
+      // Clicked an existing IText edit → enter editing
+      if (target && target._isTextEdit) {
+        fc.setActiveObject(target);
+        target.enterEditing();
         return;
       }
-      if (opt.target) return;
 
-      const p = getPointer(opt.e);
-      console.log(`[editText] Click at (${p.x.toFixed(1)}, ${p.y.toFixed(1)}), ${S.pageTextItems.length} text items available`);
+      // Clicked a text block outline → create editable IText
+      if (target && target._isTextBlock) {
+        const item = target._textItem;
+        console.log(`[editText] Editing: "${item.str}" at (${item.x.toFixed(1)}, ${item.y.toFixed(1)})`);
 
-      const item = hitTestText(p.x, p.y);
-      if (!item) {
-        console.log('[editText] No text item hit');
+        // Remove the outline rect
+        fc.remove(target);
+
+        // White rect to cover original text
+        const bg = new fabric.Rect({
+          left: item.x - 2, top: item.y - 1,
+          width: item.width + 6, height: item.height + 2,
+          fill: 'white', selectable: false, evented: false,
+          _isTextEditBg: true,
+          _pdfX: item.pdfX, _pdfY: item.pdfY,
+        });
+        fc.add(bg);
+
+        // Editable IText
+        const itext = new fabric.IText(item.str, {
+          left: item.x, top: item.y,
+          fontSize: item.fontSize,
+          fill: '#000000',
+          fontFamily: 'sans-serif',
+          _isTextEdit: true,
+          _origStr: item.str,
+          _pdfX: item.pdfX,
+          _pdfY: item.pdfY,
+          _pdfFontSize: item.pdfFontSize,
+          _pdfWidth: item.pdfWidth,
+          _fontName: item.fontName,
+        });
+        fc.add(itext);
+        fc.setActiveObject(itext);
+        itext.enterEditing();
         return;
       }
-      console.log(`[editText] Hit: "${item.str}" at (${item.x.toFixed(1)}, ${item.y.toFixed(1)}) size ${item.width.toFixed(1)}x${item.height.toFixed(1)}`);
-
-      // Check if already editing this text item
-      const existing = fc.getObjects().find(o =>
-        o._isTextEdit && o._pdfX === item.pdfX && o._pdfY === item.pdfY
-      );
-      if (existing) {
-        fc.setActiveObject(existing);
-        existing.enterEditing();
-        return;
-      }
-      // White rect to cover original text
-      const bg = new fabric.Rect({
-        left: item.x - 2, top: item.y - 1,
-        width: item.width + 6, height: item.height + 2,
-        fill: 'white', selectable: false, evented: false,
-        _isTextEditBg: true,
-        _pdfX: item.pdfX, _pdfY: item.pdfY,
-      });
-      fc.add(bg);
-      // Editable IText
-      const itext = new fabric.IText(item.str, {
-        left: item.x, top: item.y,
-        fontSize: item.fontSize,
-        fill: '#000000',
-        fontFamily: 'sans-serif',
-        _isTextEdit: true,
-        _origStr: item.str,
-        _pdfX: item.pdfX,
-        _pdfY: item.pdfY,
-        _pdfFontSize: item.pdfFontSize,
-        _pdfWidth: item.pdfWidth,
-        _fontName: item.fontName,
-      });
-      fc.add(itext);
-      fc.setActiveObject(itext);
-      itext.enterEditing();
     });
   }
 
